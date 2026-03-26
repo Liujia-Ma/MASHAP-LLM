@@ -100,7 +100,7 @@ class CodingRunner:
                     f"Episode {episode}/{episodes}"
                     f"(total step num: {total_num_steps} | average step reward: {avg_step_reward})",
                 )
-                train_infos["avg_step_rewards"] = avg_step_reward
+                train_infos["average_step_rewards"] = avg_step_reward
                 self.log_train(train_infos, total_num_steps)
                 self.writter.add_scalar('average_reward', avg_step_reward, training_steps)
             progress_bar.update(1)
