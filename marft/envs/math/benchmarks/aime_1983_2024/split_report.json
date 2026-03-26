@@ -1,0 +1,11 @@
+{
+  "input_path": "D:\\Projects\\PycharmProjects\\MARFT-main\\marft\\envs\\math\\benchmarks\\aime_1983_2024\\full.json",
+  "split_mode": "stratified",
+  "seed": 42,
+  "train_ratio": 0.7,
+  "total_valid": 933,
+  "train_file": "train_70.json",
+  "test_file": "test_30.json",
+  "train_size": 638,
+  "test_size": 295
+}
