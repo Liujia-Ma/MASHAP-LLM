@@ -138,6 +138,8 @@ def get_config():
     parser.add_argument("--n_eval_rollout_threads", type=int, default=1, help="Number of parallel envs for evaluating rollouts.")
     parser.add_argument("--num_env_steps", type=int, default=10e6, help="Number of environment steps to train (default: 10e6).")
     parser.add_argument("--horizon", type=int, default=1, help="The horizon of the rollout.")
+    parser.add_argument("--resume_run_dir", type=str, default=None, help="existing run directory to continue logging/checkpoint numbering")
+    parser.add_argument("--resume_steps", type=int, default=None, help="resume step offset; if omitted and --load_path is steps_xxxx, it is inferred automatically")
 
     # env parameters
     parser.add_argument("--env_name", type=str, default="MATH", help="Which env to run on")

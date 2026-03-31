@@ -18,6 +18,11 @@ class MathRunner:
         self.log_interval = self.all_args.log_interval
         self.eval_interval = self.all_args.eval_interval
         self.algo = self.all_args.algorithm_name
+
+        # 所有的step都要加上resume_steps偏移，以保证日志和模型保存的step数是连续的
+        self.resume_steps = int(getattr(self.all_args, "resume_steps", 0) or 0)
+        self.resume_training_updates = self.resume_steps // max(1, self.episode_length * self.n_rollout_threads)
+        
         self.envs = config["envs"]
         self.eval_envs = config["eval_envs"]
 
@@ -51,7 +56,7 @@ class MathRunner:
 
 
     def run(self):
-        training_steps = 0
+        training_steps = self.resume_training_updates
         next_obs = self.envs.reset()
         self.buffer.obs[self.buffer.cur_batch_index, 0] = next_obs.copy()
 
@@ -66,7 +71,7 @@ class MathRunner:
                 torch.cuda.empty_cache()
                 self.eval(training_steps)
 
-            total_num_steps = (episode + 1) * self.episode_length * self.n_rollout_threads
+            total_num_steps = self.resume_steps + (episode + 1) * self.episode_length * self.n_rollout_threads
             for step in range(self.episode_length):
                 torch.cuda.empty_cache()
                 rollout_obs, actions, action_tokens, values, log_probs = self.mas.infer_for_rollout(self.buffer.obs[self.buffer.cur_batch_index, step])

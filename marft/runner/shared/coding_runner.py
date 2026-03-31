@@ -18,6 +18,8 @@ class CodingRunner:
         self.log_interval = self.all_args.log_interval
         self.eval_interval = self.all_args.eval_interval
         self.algo = self.all_args.algorithm_name
+        self.resume_steps = int(getattr(self.all_args, "resume_steps", 0) or 0)
+        self.resume_training_updates = self.resume_steps // max(1, self.episode_length * self.n_rollout_threads)
         self.envs = config["envs"]
         self.eval_envs = config["eval_envs"]
 
@@ -51,7 +53,7 @@ class CodingRunner:
 
 
     def run(self):
-        training_steps = 0
+        training_steps = self.resume_training_updates
         next_obs = self.envs.reset()
         self.buffer.obs[self.buffer.cur_batch_index, 0] = next_obs.copy()
 
@@ -66,7 +68,7 @@ class CodingRunner:
                 torch.cuda.empty_cache()
                 self.eval(training_steps)
 
-            total_num_steps = (episode + 1) * self.episode_length * self.n_rollout_threads
+            total_num_steps = self.resume_steps + (episode + 1) * self.episode_length * self.n_rollout_threads
             for step in range(self.episode_length):
                 torch.cuda.empty_cache()
                 rollout_obs, actions, action_tokens, values, log_probs = self.mas.infer_for_rollout(self.buffer.obs[self.buffer.cur_batch_index, step])
@@ -77,7 +79,7 @@ class CodingRunner:
                 self.insert(data)
 
                 for i in range(self.n_rollout_threads):
-                    global_step = episode * self.episode_length * self.n_rollout_threads + step * self.n_rollout_threads + i
+                    global_step = self.resume_steps + episode * self.episode_length * self.n_rollout_threads + step * self.n_rollout_threads + i
                     if dones[i, 0]:
                         episodic_return = infos[i]['episodic_return']
                         self.writter.add_scalar("episodic return", episodic_return, global_step)
