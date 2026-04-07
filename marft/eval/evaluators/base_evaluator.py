@@ -32,8 +32,17 @@ class BaseEvaluator(ABC):
         self.args = kwargs
 
     def load_data(self, data_path: str | os.PathLike):
-        with open(data_path, 'r') as f:
-            data = json.load(f)
+        if str(data_path).endswith(".jsonl"):
+            data = []
+            with open(data_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    data.append(json.loads(line))
+        else:
+            with open(data_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
         print(f"Loaded {len(data)} entries from {data_path}")
         return data
 

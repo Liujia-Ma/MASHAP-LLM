@@ -44,10 +44,10 @@ def main():
     
     evaluator_cls = EVALUATOR_MAP[args.evaluator_type]
     
-    agent = MAS(**vars(args))
+    mas = MAS(**vars(args))
     
     evaluator = evaluator_cls(
-        agent=agent,
+        mas=mas,
         data_path=args.data_path,
         output_dir=args.output_dir,
         metrics_filename=args.metrics_filename,

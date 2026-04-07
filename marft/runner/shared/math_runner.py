@@ -2,8 +2,15 @@ import os
 import numpy as np
 from tqdm import tqdm
 import torch
+from transformers import AutoTokenizer
 from tensorboardX import SummaryWriter
 from marft.mas import MAS
+from .qcritic_mode_utils import (
+    DEFAULT_ABSENCE_MESSAGE_TEMPLATE,
+    build_qcritic_joint_tokens,
+    build_masked_coalition_allocator,
+    build_real_coalition_allocator,
+)
 
 class MathRunner:
     """Runner class to perform training, evaluation. and data collection. See parent class for details."""
@@ -50,6 +57,25 @@ class MathRunner:
         else:
             raise NotImplementedError
         
+        if self.all_args.reward_allocation in {"qcritic_rollout", "qcritic_masked"}:
+            self.qcritic_state_tokenizer = AutoTokenizer.from_pretrained(
+                self.all_args.model_name_or_path,
+                use_fast=False,
+                padding_side="left",
+            )
+            if self.qcritic_state_tokenizer.pad_token is None:
+                self.qcritic_state_tokenizer.pad_token = self.qcritic_state_tokenizer.eos_token
+
+        if self.all_args.reward_allocation == "qcritic_rollout":
+            self.masked_coalition_allocator = build_masked_coalition_allocator(self.all_args, self.mas, for_rollout=True)
+            self.real_coalition_allocator = build_real_coalition_allocator(self.all_args)
+            for env in self.envs.envs:
+                env.set_qcritic_rollout_allocator_fn(self._allocate_qcritic_rollout_rewards)
+        elif self.all_args.reward_allocation == "qcritic_masked":
+            self.masked_coalition_allocator = build_masked_coalition_allocator(self.all_args, self.mas, for_rollout=False)
+            for env in self.envs.envs:
+                env.set_qcritic_masked_allocator_fn(self._allocate_qcritic_masked_rewards)
+
         self.run_dir = config["run_dir"]
         self._make_log_dir()
         self.writter = SummaryWriter(self.log_dir)
@@ -72,6 +98,9 @@ class MathRunner:
                 self.eval(training_steps)
 
             total_num_steps = self.resume_steps + (episode + 1) * self.episode_length * self.n_rollout_threads
+            episode_global_scores = []
+            sr_losses = []
+            sr_grad_norms = []
             for step in range(self.episode_length):
                 torch.cuda.empty_cache()
                 rollout_obs, actions, action_tokens, values, log_probs = self.mas.infer_for_rollout(self.buffer.obs[self.buffer.cur_batch_index, step])
@@ -83,6 +112,14 @@ class MathRunner:
 
                 for i in range(self.n_rollout_threads):
                     global_step = total_num_steps + step * self.n_rollout_threads + i
+                    episode_global_scores.append(float(infos[i].get("total_score", infos[i].get("episodic_return", 0.0))))
+                    if self.all_args.reward_allocation == "qcritic_masked":
+                        sr_loss = infos[i].get("qcritic_loss", None)
+                        sr_grad = infos[i].get("qcritic_grad_norm", None)
+                        if sr_loss is not None:
+                            sr_losses.append(float(sr_loss))
+                        if sr_grad is not None:
+                            sr_grad_norms.append(float(sr_grad))
                     if dones[i, 0]:
                         episodic_return = infos[i]['episodic_return']
                         self.writter.add_scalar("episodic return", episodic_return, global_step)
@@ -100,12 +137,37 @@ class MathRunner:
 
             # log info
             if episode % self.log_interval == 0:
-                avg_step_reward = np.mean(self.buffer.rewards[self.buffer.pre_batch_index, :, :, -1])
+                if self.all_args.reward_allocation == "terminal":
+                    avg_step_reward = np.mean(self.buffer.rewards[self.buffer.pre_batch_index, :, :, -1])
+                else:
+                    avg_step_reward = float(np.mean(episode_global_scores)) if len(episode_global_scores) > 0 else 0.0
+                # Log per-agent reward only for Shapley allocation modes.
+                # For baseline terminal mode, keep logs minimal and unchanged.
+                per_agent_reward = None
+                if self.all_args.reward_allocation != "terminal":
+                    per_agent_reward = np.mean(self.buffer.rewards[self.buffer.pre_batch_index], axis=(0, 1))
+                if hasattr(self.buffer, "action_level_advantages"):
+                    per_agent_advantage = np.mean(self.buffer.action_level_advantages[self.buffer.pre_batch_index], axis=(0, 1))
+                elif hasattr(self.buffer, "tppo_advantages"):
+                    per_agent_advantage = np.mean(self.buffer.tppo_advantages[self.buffer.pre_batch_index], axis=(0, 1, 3))
+                else:
+                    per_agent_advantage = None
                 progress_bar.set_description(
                     f"Episode {episode}/{episodes}"
                     f"(total step num: {total_num_steps} | average step reward: {avg_step_reward:.4f})",
                 )
                 train_infos["average_step_rewards"] = avg_step_reward
+                if per_agent_reward is not None:
+                    for agent_id, agent_reward in enumerate(per_agent_reward):
+                        train_infos[f"reward/agent_{agent_id}"] = float(agent_reward)
+                if per_agent_advantage is not None:
+                    for agent_id, agent_adv in enumerate(per_agent_advantage):
+                        train_infos[f"advantage/agent_{agent_id}"] = float(agent_adv)
+                if self.all_args.reward_allocation == "qcritic_masked":
+                    if len(sr_losses) > 0:
+                        train_infos["qcritic/loss"] = float(np.mean(sr_losses))
+                    if len(sr_grad_norms) > 0:
+                        train_infos["qcritic/grad_norm"] = float(np.mean(sr_grad_norms))
                 self.log_train(train_infos, total_num_steps)
                 self.writter.add_scalar('average reward', avg_step_reward, training_steps)
             progress_bar.update(1)
@@ -116,6 +178,98 @@ class MathRunner:
         masks = np.ones((self.n_rollout_threads, self.num_agents), dtype=np.float32)
         masks[dones_env == True] = np.zeros(((dones_env == True).sum(), self.num_agents), dtype=np.float32)
         self.buffer.insert(next_obs, actions, rollout_obs, values, rewards, masks, action_tokens, log_probs)
+
+    def _allocate_qcritic_masked_rewards(
+        self,
+        actions: np.ndarray,
+        global_score: float,
+        original_problem: str,
+        agent_states: str,
+    ):
+        """
+        Build contextual prompt input for Q-critic, then allocate rewards.
+        """
+        state_tokens = self.qcritic_state_tokenizer(
+            [agent_states],
+            return_tensors="pt",
+            padding="max_length",
+            truncation=True,
+            max_length=self.all_args.max_new_tokens * self.num_agents,
+        )["input_ids"].to(self.mas.qcritic_device).long()  # [1, T_state]
+        state_only_joint_tokens = state_tokens.unsqueeze(1)  # [1, 1, T_state]
+        self.masked_coalition_allocator.update_critic(state_only_joint_tokens, torch.tensor([global_score], device=self.mas.qcritic_device))
+        joint_tokens = build_qcritic_joint_tokens(
+            tokenizer=self.masked_coalition_allocator.tokenizer,
+            device=self.mas.qcritic_device,
+            profiles=self.mas.profiles,
+            actions=actions,
+            coalition_indices=tuple(range(self.num_agents)),
+            original_problem=original_problem,
+            agent_states=None,
+            include_state=False,
+            max_new_tokens=self.all_args.max_new_tokens,
+        )
+        rewards = self.masked_coalition_allocator.compute_shapley_values(joint_tokens)
+        target = torch.tensor([global_score], device=self.mas.qcritic_device, dtype=torch.float32)
+        sums = rewards.sum(dim=1, keepdim=True)
+        safe = torch.where(torch.abs(sums) < 1e-8, torch.ones_like(sums), sums)
+        rewards = rewards * (target.view(-1, 1) / safe)
+        stats = getattr(self.masked_coalition_allocator, "last_update_stats", {})
+        return rewards[0].detach().float().cpu().tolist(), stats
+
+    def _allocate_qcritic_rollout_rewards(
+        self,
+        actions: np.ndarray,
+        base_state: str,
+        global_score: float,
+        original_problem: str,
+    ):
+        state_tokens = self.qcritic_state_tokenizer(
+            [base_state],
+            return_tensors="pt",
+            padding="max_length",
+            truncation=True,
+            max_length=self.all_args.max_new_tokens * self.num_agents,
+        )["input_ids"].to(self.mas.qcritic_device).long()  # [1, T_state]
+        state_only_joint_tokens = state_tokens.unsqueeze(1)  # [1, 1, T_state]
+        self.masked_coalition_allocator.update_critic(state_only_joint_tokens, torch.tensor([global_score], device=self.mas.qcritic_device))
+
+        def rollout_fn(coalition_indices: tuple[int, ...]):
+            return self.mas.get_actions_sequential_counterfactual(
+                np.array([[base_state for _ in range(self.num_agents)]], dtype=np.object_),
+                coalition_indices=coalition_indices,
+                absence_message_template=DEFAULT_ABSENCE_MESSAGE_TEMPLATE,
+            )[0]
+
+        def coalition_value_fn(effective_actions: np.ndarray, coalition_indices: tuple[int, ...]) -> float:
+            joint_tokens = build_qcritic_joint_tokens(
+                tokenizer=self.masked_coalition_allocator.tokenizer,
+                device=self.mas.qcritic_device,
+                profiles=self.mas.profiles,
+                actions=effective_actions,
+                coalition_indices=coalition_indices,
+                original_problem=original_problem,
+                agent_states=None,
+                include_state=False,
+                max_new_tokens=self.all_args.max_new_tokens,
+            )
+            value = self.masked_coalition_allocator.estimate_coalition_value(joint_tokens, coalition_indices)
+            return float(value[0].detach().item())
+
+        def coalition_has_answer_fn(coalition_indices: tuple[int, ...]) -> bool:
+            coalition_set = set(coalition_indices)
+            return any(i in coalition_set and self.mas.profiles[i]["with_answer"] for i in range(self.num_agents))
+
+        rewards, debug = self.real_coalition_allocator.allocate(
+            actions=actions,
+            rollout_fn=rollout_fn,
+            coalition_value_fn=coalition_value_fn,
+            coalition_has_answer_fn=coalition_has_answer_fn,
+            total_score_precomputed=float(global_score),
+        )
+        debug["counterfactual_mode"] = "rollout"
+        debug["absence_message_template"] = DEFAULT_ABSENCE_MESSAGE_TEMPLATE
+        return rewards.tolist(), debug
 
     @torch.no_grad()
     def before_update(self):

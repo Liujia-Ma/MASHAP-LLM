@@ -14,6 +14,18 @@ class MathEvaluator(BaseEvaluator):
     
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+
+    @staticmethod
+    def _extract_gt(entry: dict) -> str:
+        # Support multiple benchmark schemas.
+        if "final_answer" in entry:
+            return entry["final_answer"]
+        if "answer" in entry:
+            return entry["answer"]
+        raise KeyError(
+            "Ground-truth answer field not found. Expected one of: "
+            "['final_answer', 'answer']."
+        )
     
     def evaluate(self):
         correct = 0.
@@ -25,7 +37,7 @@ class MathEvaluator(BaseEvaluator):
                 response = {}
                 to_check = []
                 problem = entry["problem"]
-                gt = entry["final_answer"]
+                gt = self._extract_gt(entry)
                 response["problem"] = problem
                 response["gt"] = gt
                 problem = "<|im_start|>problem: " + problem + " <|im_end|>\n"

@@ -6,6 +6,8 @@ from typing import Optional
 from . import math
 from . import math_verify
 
+DEFAULT_ABSENCE_MESSAGE_TEMPLATE = "System: The {role} did not participate in this round."
+
 # training data with mode="train" and testing data with mode="test"
 def load_dataset(dataset_path, mode):
     with open(dataset_path, "r") as f:
@@ -51,7 +53,19 @@ def extract_boxed_value(text):
 
 class MathEnv:
 
-    def __init__(self, rank, model_name, num_agents, profile_path, dataset_path, horizon, mode):
+    def __init__(
+        self,
+        rank,
+        model_name,
+        num_agents,
+        profile_path,
+        dataset_path,
+        horizon,
+        mode,
+        reward_allocation="terminal",
+        clip_value=-1.0,
+        debug_print_state=False,
+    ):
         
         self.rank = rank
         self.mode = mode
@@ -62,6 +76,14 @@ class MathEnv:
         assert self.n_agents == len(self.profiles), "Number of agents must match the number of profiles."
         self.max_steps = horizon
         self.step_count = 0
+        # Reward allocation config:
+        # - terminal: baseline behavior ([0, ..., score] to last agent)
+        # - shapley: fair per-agent allocation by marginal contribution
+        self.reward_allocation = reward_allocation
+        self.clip_value = clip_value
+        self.debug_print_state = debug_print_state
+        self.qcritic_masked_allocator_fn = None
+        self.qcritic_rollout_allocator_fn = None
         
         self.problem = None
         self.label = None
@@ -71,7 +93,8 @@ class MathEnv:
 
     def reset(self):
         # Keep sampling until a valid label is found
-        while True:
+        max_trials = max(1, len(self.dataset) * 2)
+        for _ in range(max_trials):
             problem_answer_pair = random.choice(self.dataset)
             
             # Try to get the final answer label
@@ -87,6 +110,11 @@ class MathEnv:
             self.problem = problem_answer_pair["problem"]
             self.label = label
             break
+        else:
+            raise RuntimeError(
+                "MathEnv.reset failed to sample a valid label after multiple trials. "
+                "Please check dataset quality (missing final_answer/boxed solution)."
+            )
 
         self.current_state = '<|im_start|>problem: ' + self.problem + "<|im_end|>\n"
         self.history = []
@@ -94,21 +122,37 @@ class MathEnv:
         self.step_count = 0
         return obs
     
+    def set_qcritic_masked_allocator_fn(self, allocator_fn):
+        """
+        Inject Q-critic masked allocator callback.
+
+        allocator_fn signature:
+            allocator_fn(actions: np.ndarray[str], global_score: float, original_problem: str, agent_states: str) -> list[float]
+        """
+        self.qcritic_masked_allocator_fn = allocator_fn
+
+    def set_qcritic_rollout_allocator_fn(self, allocator_fn):
+        """
+        Inject Q-critic rollout allocator callback.
+
+        allocator_fn signature:
+            allocator_fn(actions: np.ndarray[str], base_state: str, global_score: float, original_problem: str) -> tuple[list[float], dict]
+        """
+        self.qcritic_rollout_allocator_fn = allocator_fn
+
     def step(self, actions):
         self.step_count += 1
-        actions_to_check = []
+        base_state = self.current_state
         self.state_transition(actions)
-
-        for i in range(self.n_agents):
-            if self.profiles[i]["with_answer"]:
-                actions_to_check.append(actions[i])
-
-        score = 0.0
-        for action in actions_to_check:
-            # if self._is_correct(action): 
-            #     score += 1.0
-            score += self.compute_reward(action, self.label)
-        score /= len(actions_to_check) # normalize
+        actions_to_check = [actions[i] for i in range(self.n_agents) if self.profiles[i]["with_answer"]]
+        if len(actions_to_check) == 0:
+            score = 0.0
+        else:
+            score = 0.0
+            for action in actions_to_check:
+                score += self.compute_reward(action, self.label)
+            score /= len(actions_to_check)
+            score = float(score)
         
         if score > 0.0 or self.step_count >= self.max_steps:
             dones = np.ones((self.n_agents), dtype=bool)
@@ -120,10 +164,60 @@ class MathEnv:
             self.current_state = self.current_state + "judge: The answer is incorrect.\n"
         else:
             self.current_state = self.current_state + "judge: The answer is correct.\n"
+        if self.debug_print_state and self.rank == 0:
+            print(
+                f"[debug-state][math][mode={self.mode}] step={self.step_count} "
+                f"chars={len(self.current_state)} score={float(score):.4f}\n{self.current_state}"
+            )
 
         next_obs = np.array([self.current_state for _ in range(self.n_agents)], dtype=np.object_)
-        rewards = [0 if idx != self.n_agents - 1 else score for idx in range(self.n_agents)]
-        infos = {"state": self.current_state, "gt": self.label, "episodic_return": score}
+        
+        if self.reward_allocation == "qcritic_rollout":
+            if self.qcritic_rollout_allocator_fn is None:
+                raise RuntimeError(
+                    "qcritic_rollout mode requires qcritic_rollout_allocator_fn. "
+                    "Please ensure runner injects it before training."
+                )
+            alloc_out = self.qcritic_rollout_allocator_fn(actions, base_state, float(score), self.problem)
+            if isinstance(alloc_out, tuple) and len(alloc_out) == 2:
+                rewards, shapley_debug = alloc_out
+            else:
+                rewards, shapley_debug = alloc_out, {}
+            if not isinstance(shapley_debug, dict):
+                shapley_debug = {}
+            shapley_debug.setdefault("allocation_mode", "qcritic_rollout")
+            shapley_debug.setdefault("total_score", float(score))
+            shapley_debug.setdefault("counterfactual_mode", "rollout")
+            shapley_debug.setdefault("absence_message_template", DEFAULT_ABSENCE_MESSAGE_TEMPLATE)
+        elif self.reward_allocation == "qcritic_masked":
+            if self.qcritic_masked_allocator_fn is None:
+                raise RuntimeError(
+                    "qcritic_masked mode requires qcritic_masked_allocator_fn. "
+                    "Please ensure runner injects it before training."
+                )
+            alloc_out = self.qcritic_masked_allocator_fn(actions, float(score), self.problem, base_state)
+            if isinstance(alloc_out, tuple) and len(alloc_out) == 2:
+                rewards, sr_stats = alloc_out
+            else:
+                rewards, sr_stats = alloc_out, {}
+            shapley_debug = {"allocation_mode": "qcritic_masked", "total_score": float(score)}
+            if isinstance(sr_stats, dict):
+                if sr_stats.get("loss", None) is not None:
+                    shapley_debug["qcritic_loss"] = float(sr_stats["loss"])
+                if sr_stats.get("grad_norm", None) is not None:
+                    shapley_debug["qcritic_grad_norm"] = float(sr_stats["grad_norm"])
+        else:
+            rewards = [0 if idx != self.n_agents - 1 else score for idx in range(self.n_agents)]
+            shapley_debug = {"allocation_mode": "terminal", "total_score": float(score)}
+        
+        infos = {
+            "state": self.current_state,
+            "gt": self.label,
+            "episodic_return": score,
+            "reward_allocation": self.reward_allocation,
+            "reward_vector": rewards,
+            **shapley_debug,
+        }
         return next_obs, rewards, dones, infos
 
     def state_transition(self, actions):

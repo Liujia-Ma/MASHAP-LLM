@@ -69,6 +69,11 @@ class MAS(ABC):
             profiles=self.profiles,
             preferred_device=kwargs.get("critic_device"),
         )
+        self.qcritic_device = self._select_qcritic_device(
+            available_devices=available_devices,
+            profiles=self.profiles,
+            critic_device=self.device,
+        )
         if isinstance(self.device, str) and self.device.startswith("cuda"):
             torch.cuda.set_device(self.device)
 
@@ -161,6 +166,29 @@ class MAS(ABC):
             print(f"Load critic from {critic_path}")
         return critic
 
+    def _select_qcritic_device(self, available_devices, profiles, critic_device):
+        if len(available_devices) == 0:
+            print("[MAS] no CUDA device found, qcritic assigned to cpu.")
+            return "cpu"
+
+        used_cuda = set()
+        for profile in profiles:
+            dev = _normalize_cuda_device(profile.get("device"))
+            if isinstance(dev, str) and dev.startswith("cuda"):
+                used_cuda.add(dev)
+
+        critic_dev = _normalize_cuda_device(critic_device)
+        if isinstance(critic_dev, str) and critic_dev.startswith("cuda"):
+            used_cuda.add(critic_dev)
+
+        for dev in available_devices:
+            if dev not in used_cuda:
+                print(f"[MAS] qcritic assigned to remaining CUDA device: {dev}")
+                return dev
+
+        print(f"[MAS] no remaining CUDA device after agent->critic placement; qcritic assigned to {critic_dev}.")
+        return critic_dev if critic_dev is not None else available_devices[0]
+
     @torch.no_grad()
     def get_actions_sequential(self, obs: np.ndarray):
         """
@@ -215,6 +243,67 @@ class MAS(ABC):
             all_actions[:, agent_idx] = actions
 
         return all_obs, all_actions, all_action_tokens
+
+    @torch.no_grad()
+    def get_actions_sequential_counterfactual(
+        self,
+        obs: np.ndarray,
+        coalition_indices,
+        absence_message_template: str = "System: The {role} did not participate in this round.",
+    ) -> np.ndarray:
+        """
+        Counterfactual rollout for a fixed coalition S.
+
+        For agents in S, generate responses normally with their own policy.
+        For agents not in S, inject a deterministic absence message, e.g.:
+          "System: The Planner did not participate in this round."
+
+        This function is used to estimate v(S) under counterfactual participation
+        settings when reward_allocation == "qcritic_rollout".
+        """
+        rollout_threads, num_agents = obs.shape
+        coalition = set(coalition_indices)
+        all_actions = np.empty((rollout_threads, num_agents), dtype=np.object_)
+
+        prompts = obs[:, 0].tolist()
+        for agent_idx in range(num_agents):
+            role = self.profiles[agent_idx]["role"]
+            prompts = [prompt + "<|im_start|>" + role + ": " for prompt in prompts]
+
+            if agent_idx not in coalition:
+                absent_action = absence_message_template.format(role=role)
+                actions = np.array([absent_action for _ in range(rollout_threads)], dtype=np.object_)
+                for i in range(rollout_threads):
+                    prompts[i] = prompts[i] + absent_action + "<|im_end|>\n"
+                all_actions[:, agent_idx] = actions
+                continue
+
+            prompts_with_profile = [self.profiles[agent_idx]["prompt"] + prompt for prompt in prompts]
+            token_seq = self.tokenizer(prompts_with_profile, return_tensors="pt", padding=True)
+            device = self.agents[agent_idx].device
+            input_ids = token_seq["input_ids"].to(device)
+            attn_mask = token_seq["attention_mask"].to(device)
+            output = self.agents[agent_idx].generate(
+                input_ids,
+                attention_mask=attn_mask,
+                do_sample=True,
+                top_k=50,
+                temperature=0.5,
+                max_new_tokens=self.max_new_tokens,
+                eos_token_id=self.tokenizer.eos_token_id,
+                pad_token_id=self.tokenizer.pad_token_id,
+                return_dict_in_generate=True,
+            )
+            sequences = output.sequences
+            actions = []
+            for i in range(rollout_threads):
+                action_token = sequences[i][input_ids[i].shape[0] :]
+                action = self.tokenizer.decode(action_token, skip_special_tokens=True)
+                prompts[i] = prompts[i] + action + "<|im_end|>\n"
+                actions.append(action)
+            all_actions[:, agent_idx] = np.array(actions, dtype=np.object_)
+
+        return all_actions
 
 
     def get_slice(self, logits: torch.Tensor, obs_full_lengths: int, act_real_lengths: torch.Tensor) -> torch.Tensor:
