@@ -189,6 +189,17 @@ def get_config():
     parser.add_argument("--use_policy_active_masks", action="store_false", default=True, help="by default True, whether to mask useless data in policy loss.")
     parser.add_argument("--huber_delta", type=float, default=10.0, help="coefficience of huber loss.")
     parser.add_argument("--kl_threshold", type=float, default=1e-3, help="if kl divergence is greater than this, force no update.")
+    
+    # reward allocation parameters
+    # NOTE:
+    # - `terminal` keeps the original baseline behavior exactly:
+    #   only the last agent receives the environment score.
+    # - `qcritic_rollout` enables fair credit assignment by allocating the full
+    #   environment score to all agents according to counterfactual rollout-based Shapley values.
+    parser.add_argument("--reward_allocation", type=str, default="terminal", choices=["terminal", "qcritic_rollout", "qcritic_masked"], help="reward allocation strategy. 'terminal' is baseline; 'qcritic_rollout' uses counterfactual rollout + Q-critic valuation; 'qcritic_masked' uses direct Q-critic masked Shapley allocation.")
+    parser.add_argument("--clip_value", type=float, default=-1.0, help="clip each Shapley reward to [-clip_value, clip_value] only when > 0; <= 0 disables clipping (default: -1.0).")
+    parser.add_argument("--qcritic_lr", type=float, default=1e-5, help="learning rate for masked-coalition Q-critic value head.")
+    parser.add_argument("--mask_token_type", type=str, default="pad-only", choices=["pad-only", "zero", "random", "mean", "semantic-placeholder"], help="token replacement strategy for masked-out agents in qcritic_masked mode.")
 
     # run parameters
     parser.add_argument("--use_linear_lr_decay", action="store_true", default=False, help="use a linear schedule on the learning rate")
@@ -198,6 +209,7 @@ def get_config():
 
     # log parameters
     parser.add_argument("--log_interval", type=int, default=1, help="time duration between contiunous twice log printing.",)
+    parser.add_argument("--debug_print_state", action="store_true", default=False, help="print full post-judge state at every env step for debugging context truncation.")
 
     # eval parameters
     parser.add_argument("--use_eval", action="store_true", default=False, help="by default, do not start evaluation. If set`, start evaluation alongside with training.")

@@ -92,6 +92,22 @@ The repository supports **agent-by-agent training**, where a single agent is tra
 ## Resume Training
 LLMs are hard to train and the training process often crashes if the LLM explores some exotic tokens, which is really normal. Thus, resume training helps to resume training if the LaMAS performance starts to collapse. To use resume training, specify the argument `--load_path`, and under the path, there should be multiple folders contain different LoRA adapter parameters and configurations. Also, a critic model `critic.pth` should be contained and it will be auto-loaded.
 
+## Reward Allocation Modes
+The framework now supports three reward-allocation strategies:
+
+- `terminal` (default): original baseline behavior, only the last agent receives task score.
+- `qcritic_rollout`: allocate rewards by re-running coalition-specific counterfactual rollouts (higher fidelity, higher compute), then valuing coalitions with Q-critic.
+- `qcritic_masked`: allocate rewards via direct centralized Q-critic + token masking Shapley decomposition.
+
+Related arguments:
+
+- `--reward_allocation {terminal,qcritic_rollout,qcritic_masked}`
+- `--clip_value` (disabled by default when <= 0)
+- `--qcritic_lr` (used in `qcritic_masked`)
+- `--mask_token_type {pad-only,zero,random,mean,semantic-placeholder}` (used in `qcritic_masked`)
+
+This design is backward compatible: if you keep default `--reward_allocation terminal`, baseline behavior is unchanged.
+
 ## Contributing
 We welcome contributions to improve the framework. To contribute:
 1. Fork the repository.
