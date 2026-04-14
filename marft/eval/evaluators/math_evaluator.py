@@ -28,10 +28,11 @@ class MathEvaluator(BaseEvaluator):
         )
     
     def evaluate(self):
-        correct = 0.
+        correct = 0.0
         self.metrics["accuracy"] = 0.
-        self.metrics["correct"] = 0
+        self.metrics["correct"] = 0.0
         self.metrics["total"] = len(self.dataset)
+        self.metrics["metrics"] = self._normalize_base_filename(self.metrics_filename, "metrics")
         with tqdm(total=len(self.dataset), desc="Evaluating...") as pbar:
             for idx, entry in enumerate(tqdm(self.dataset), 1):
                 response = {}
@@ -51,12 +52,14 @@ class MathEvaluator(BaseEvaluator):
                         to_check.append(actions[agent_idx])
                 result = self.check_response(to_check, gt)
                 response["result"] = result
-                correct += sum(result)/len(result)
+                sample_correct = (sum(result) / len(result)) if len(result) > 0 else 0.0
+                correct += sample_correct
                 current_acc = correct / idx if idx > 0 else 0.0
                 pbar.set_postfix({'acc': f'{current_acc:.2%}',})
                 pbar.update(1)
                 self.responses.append(response)
-        self.metrics["accuracy"] = correct / len(self.dataset)
+        self.metrics["correct"] = float(correct)
+        self.metrics["accuracy"] = (correct / len(self.dataset)) if len(self.dataset) > 0 else 0.0
         self._save_responses()
         self._save_metrics()
         return self.metrics

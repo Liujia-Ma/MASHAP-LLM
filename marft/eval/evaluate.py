@@ -20,6 +20,7 @@ def build_parser():
     parser.add_argument('--response_filename', type=str, default=None, help='response file name')
     parser.add_argument('--metrics_filename', type=str, default=None, help='metrics file name')
     parser.add_argument('--metrics_timestamp', action='store_true', help='add timestamp to metrics file name')
+    parser.add_argument('--eval_seed', type=int, default=None, help='seed for shuffled evaluation order; if not set, shuffle with random seed')
 
     # Generation parameters
     parser.add_argument('--num_agents', type=int, default=1, help='number of agents')
@@ -44,7 +45,7 @@ def main():
     
     evaluator_cls = EVALUATOR_MAP[args.evaluator_type]
     
-    mas = MAS(**vars(args))
+    mas = MAS(**vars(args), skip_critic_init=True)
     
     evaluator = evaluator_cls(
         mas=mas,
@@ -52,7 +53,8 @@ def main():
         output_dir=args.output_dir,
         metrics_filename=args.metrics_filename,
         metrics_timestamp=args.metrics_timestamp,
-        response_filename=args.response_filename
+        response_filename=args.response_filename,
+        eval_seed=args.eval_seed,
     )
     
     # 执行评估
