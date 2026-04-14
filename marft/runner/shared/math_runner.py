@@ -2,14 +2,18 @@ import os
 import numpy as np
 from tqdm import tqdm
 import torch
-from transformers import AutoTokenizer
 from tensorboardX import SummaryWriter
 from marft.mas import MAS
+from marft.envs.math import math_verify
 from .qcritic_mode_utils import (
     DEFAULT_ABSENCE_MESSAGE_TEMPLATE,
     build_qcritic_joint_tokens,
     build_masked_coalition_allocator,
+    build_rollout_qcritic_allocator,
     build_real_coalition_allocator,
+    load_qcritic_checkpoint,
+    register_qcritic_allocator_on_mas,
+    save_qcritic_value_head,
 )
 
 class MathRunner:
@@ -57,22 +61,15 @@ class MathRunner:
         else:
             raise NotImplementedError
         
-        if self.all_args.reward_allocation in {"qcritic_rollout", "qcritic_masked"}:
-            self.qcritic_state_tokenizer = AutoTokenizer.from_pretrained(
-                self.all_args.model_name_or_path,
-                use_fast=False,
-                padding_side="left",
-            )
-            if self.qcritic_state_tokenizer.pad_token is None:
-                self.qcritic_state_tokenizer.pad_token = self.qcritic_state_tokenizer.eos_token
-
-        if self.all_args.reward_allocation == "qcritic_rollout":
-            self.masked_coalition_allocator = build_masked_coalition_allocator(self.all_args, self.mas, for_rollout=True)
+        if self.all_args.reward_allocation == "real_coalition":
+            self.qcritic_allocator = build_rollout_qcritic_allocator(self.all_args, self.mas)
+            register_qcritic_allocator_on_mas(self.mas, self.qcritic_allocator)
             self.real_coalition_allocator = build_real_coalition_allocator(self.all_args)
             for env in self.envs.envs:
                 env.set_qcritic_rollout_allocator_fn(self._allocate_qcritic_rollout_rewards)
-        elif self.all_args.reward_allocation == "qcritic_masked":
-            self.masked_coalition_allocator = build_masked_coalition_allocator(self.all_args, self.mas, for_rollout=False)
+        elif self.all_args.reward_allocation == "masked_coalition":
+            self.qcritic_allocator = build_masked_coalition_allocator(self.all_args, self.mas)
+            register_qcritic_allocator_on_mas(self.mas, self.qcritic_allocator)
             for env in self.envs.envs:
                 env.set_qcritic_masked_allocator_fn(self._allocate_qcritic_masked_rewards)
 
@@ -86,7 +83,9 @@ class MathRunner:
         next_obs = self.envs.reset()
         self.buffer.obs[self.buffer.cur_batch_index, 0] = next_obs.copy()
 
-        episodes = int(self.num_env_steps) // self.episode_length // self.n_rollout_threads
+        steps_per_episode = self.episode_length * self.n_rollout_threads
+        remaining_steps = max(0, int(self.num_env_steps) - int(self.resume_steps))
+        episodes = remaining_steps // max(1, steps_per_episode)
 
         progress_bar = tqdm(total=episodes, desc=f"Start running...", position=0, leave=True)
 
@@ -99,8 +98,8 @@ class MathRunner:
 
             total_num_steps = self.resume_steps + (episode + 1) * self.episode_length * self.n_rollout_threads
             episode_global_scores = []
-            sr_losses = []
-            sr_grad_norms = []
+            qcritic_losses = []
+            qcritic_grad_norms = []
             for step in range(self.episode_length):
                 torch.cuda.empty_cache()
                 rollout_obs, actions, action_tokens, values, log_probs = self.mas.infer_for_rollout(self.buffer.obs[self.buffer.cur_batch_index, step])
@@ -113,13 +112,15 @@ class MathRunner:
                 for i in range(self.n_rollout_threads):
                     global_step = total_num_steps + step * self.n_rollout_threads + i
                     episode_global_scores.append(float(infos[i].get("total_score", infos[i].get("episodic_return", 0.0))))
-                    if self.all_args.reward_allocation == "qcritic_masked":
-                        sr_loss = infos[i].get("qcritic_loss", None)
-                        sr_grad = infos[i].get("qcritic_grad_norm", None)
-                        if sr_loss is not None:
-                            sr_losses.append(float(sr_loss))
-                        if sr_grad is not None:
-                            sr_grad_norms.append(float(sr_grad))
+                    
+                    # Log Q-critic stats if applicable. For baseline reward allocation, these stats are not relevant and thus skipped.
+                    if self.all_args.reward_allocation != "baseline":
+                        qcritic_loss = infos[i].get("qcritic_loss", None)
+                        qcritic_grad_norm = infos[i].get("qcritic_grad_norm", None)
+                        if qcritic_loss is not None:
+                            qcritic_losses.append(float(qcritic_loss))
+                        if qcritic_grad_norm is not None:
+                            qcritic_grad_norms.append(float(qcritic_grad_norm))
                     if dones[i, 0]:
                         episodic_return = infos[i]['episodic_return']
                         self.writter.add_scalar("episodic return", episodic_return, global_step)
@@ -137,14 +138,14 @@ class MathRunner:
 
             # log info
             if episode % self.log_interval == 0:
-                if self.all_args.reward_allocation == "terminal":
+                if self.all_args.reward_allocation == "baseline":
                     avg_step_reward = np.mean(self.buffer.rewards[self.buffer.pre_batch_index, :, :, -1])
                 else:
                     avg_step_reward = float(np.mean(episode_global_scores)) if len(episode_global_scores) > 0 else 0.0
-                # Log per-agent reward only for Shapley allocation modes.
-                # For baseline terminal mode, keep logs minimal and unchanged.
+                # Log per-agent reward, advantage for masked or rollout Q-critic allocation.
+                # For terminal allocation, these per-agent stats are not meaningful and thus skipped.
                 per_agent_reward = None
-                if self.all_args.reward_allocation != "terminal":
+                if self.all_args.reward_allocation != "baseline":
                     per_agent_reward = np.mean(self.buffer.rewards[self.buffer.pre_batch_index], axis=(0, 1))
                 if hasattr(self.buffer, "action_level_advantages"):
                     per_agent_advantage = np.mean(self.buffer.action_level_advantages[self.buffer.pre_batch_index], axis=(0, 1))
@@ -157,17 +158,21 @@ class MathRunner:
                     f"(total step num: {total_num_steps} | average step reward: {avg_step_reward:.4f})",
                 )
                 train_infos["average_step_rewards"] = avg_step_reward
+                
+                # Log per-agent rewards and advantages for each mode if applicable.
                 if per_agent_reward is not None:
                     for agent_id, agent_reward in enumerate(per_agent_reward):
                         train_infos[f"reward/agent_{agent_id}"] = float(agent_reward)
                 if per_agent_advantage is not None:
                     for agent_id, agent_adv in enumerate(per_agent_advantage):
                         train_infos[f"advantage/agent_{agent_id}"] = float(agent_adv)
-                if self.all_args.reward_allocation == "qcritic_masked":
-                    if len(sr_losses) > 0:
-                        train_infos["qcritic/loss"] = float(np.mean(sr_losses))
-                    if len(sr_grad_norms) > 0:
-                        train_infos["qcritic/grad_norm"] = float(np.mean(sr_grad_norms))
+                
+                # Log Q-critic stats if applicable.
+                if self.all_args.reward_allocation != "baseline":
+                    if len(qcritic_losses) > 0:
+                        train_infos["qcritic/loss"] = float(np.mean(qcritic_losses))
+                    if len(qcritic_grad_norms) > 0:
+                        train_infos["qcritic/grad_norm"] = float(np.mean(qcritic_grad_norms))
                 self.log_train(train_infos, total_num_steps)
                 self.writter.add_scalar('average reward', avg_step_reward, training_steps)
             progress_bar.update(1)
@@ -189,17 +194,8 @@ class MathRunner:
         """
         Build contextual prompt input for Q-critic, then allocate rewards.
         """
-        state_tokens = self.qcritic_state_tokenizer(
-            [agent_states],
-            return_tensors="pt",
-            padding="max_length",
-            truncation=True,
-            max_length=self.all_args.max_new_tokens * self.num_agents,
-        )["input_ids"].to(self.mas.qcritic_device).long()  # [1, T_state]
-        state_only_joint_tokens = state_tokens.unsqueeze(1)  # [1, 1, T_state]
-        self.masked_coalition_allocator.update_critic(state_only_joint_tokens, torch.tensor([global_score], device=self.mas.qcritic_device))
         joint_tokens = build_qcritic_joint_tokens(
-            tokenizer=self.masked_coalition_allocator.tokenizer,
+            tokenizer=self.qcritic_allocator.tokenizer,
             device=self.mas.qcritic_device,
             profiles=self.mas.profiles,
             actions=actions,
@@ -209,13 +205,28 @@ class MathRunner:
             include_state=False,
             max_new_tokens=self.all_args.max_new_tokens,
         )
-        rewards = self.masked_coalition_allocator.compute_shapley_values(joint_tokens)
+        self.qcritic_allocator.update_critic(
+            joint_tokens,
+            torch.tensor([global_score], device=self.mas.qcritic_device),
+        )
+        rewards = self.qcritic_allocator.compute_shapley_values(joint_tokens)
         target = torch.tensor([global_score], device=self.mas.qcritic_device, dtype=torch.float32)
         sums = rewards.sum(dim=1, keepdim=True)
         safe = torch.where(torch.abs(sums) < 1e-8, torch.ones_like(sums), sums)
         rewards = rewards * (target.view(-1, 1) / safe)
-        stats = getattr(self.masked_coalition_allocator, "last_update_stats", {})
+        stats = getattr(self.qcritic_allocator, "last_update_stats", {})
         return rewards[0].detach().float().cpu().tolist(), stats
+
+    def _get_rollout_full_coalition_indices(self, actions: np.ndarray) -> tuple[int, ...]:
+        """
+        In rollout mode, use the answer-capable currently participating agents
+        as the full coalition for qcritic training input.
+        """
+        coalition = tuple(
+            i for i, profile in enumerate(self.mas.profiles)
+            if profile.get("with_answer", False) and str(actions[i]).strip() != ""
+        )
+        return coalition if len(coalition) > 0 else tuple(range(self.num_agents))
 
     def _allocate_qcritic_rollout_rewards(
         self,
@@ -223,18 +234,17 @@ class MathRunner:
         base_state: str,
         global_score: float,
         original_problem: str,
+        gt: str,
     ):
-        state_tokens = self.qcritic_state_tokenizer(
-            [base_state],
-            return_tensors="pt",
-            padding="max_length",
-            truncation=True,
-            max_length=self.all_args.max_new_tokens * self.num_agents,
-        )["input_ids"].to(self.mas.qcritic_device).long()  # [1, T_state]
-        state_only_joint_tokens = state_tokens.unsqueeze(1)  # [1, 1, T_state]
-        self.masked_coalition_allocator.update_critic(state_only_joint_tokens, torch.tensor([global_score], device=self.mas.qcritic_device))
+        all_agents = tuple(range(self.num_agents))
+        coalition_actions_cache: dict[tuple[int, ...], np.ndarray] = {
+            all_agents: np.array(actions, dtype=np.object_),
+        }
 
         def rollout_fn(coalition_indices: tuple[int, ...]):
+            coalition_indices = tuple(sorted(coalition_indices))
+            if coalition_indices in coalition_actions_cache:
+                return coalition_actions_cache[coalition_indices]
             return self.mas.get_actions_sequential_counterfactual(
                 np.array([[base_state for _ in range(self.num_agents)]], dtype=np.object_),
                 coalition_indices=coalition_indices,
@@ -243,7 +253,7 @@ class MathRunner:
 
         def coalition_value_fn(effective_actions: np.ndarray, coalition_indices: tuple[int, ...]) -> float:
             joint_tokens = build_qcritic_joint_tokens(
-                tokenizer=self.masked_coalition_allocator.tokenizer,
+                tokenizer=self.qcritic_allocator.tokenizer,
                 device=self.mas.qcritic_device,
                 profiles=self.mas.profiles,
                 actions=effective_actions,
@@ -253,12 +263,60 @@ class MathRunner:
                 include_state=False,
                 max_new_tokens=self.all_args.max_new_tokens,
             )
-            value = self.masked_coalition_allocator.estimate_coalition_value(joint_tokens, coalition_indices)
+            value = self.qcritic_allocator.estimate_coalition_value(joint_tokens, coalition_indices)
             return float(value[0].detach().item())
 
         def coalition_has_answer_fn(coalition_indices: tuple[int, ...]) -> bool:
             coalition_set = set(coalition_indices)
             return any(i in coalition_set and self.mas.profiles[i]["with_answer"] for i in range(self.num_agents))
+
+        def coalition_env_score(effective_actions: np.ndarray, coalition_indices: tuple[int, ...]) -> float:
+            if not coalition_has_answer_fn(coalition_indices):
+                return 0.0
+            answers = [
+                effective_actions[i]
+                for i in coalition_indices
+                if self.mas.profiles[i].get("with_answer", False)
+            ]
+            if len(answers) == 0:
+                return 0.0
+            score = 0.0
+            for ans in answers:
+                score += float(math_verify.compute_score(ans, gt))
+            return float(score / len(answers))
+
+        # Train qcritic on all coalition rollouts to reduce train/infer distribution shift.
+        # Include empty/no-answer coalitions with target=0.0 as requested.
+        coalition_losses = []
+        for mask in range(1 << self.num_agents):
+            coalition_indices = tuple(i for i in range(self.num_agents) if (mask >> i) & 1)
+            if len(coalition_indices) == 0:
+                effective_actions = np.array(
+                    [DEFAULT_ABSENCE_MESSAGE_TEMPLATE.format(role=self.mas.profiles[i]["role"]) for i in range(self.num_agents)],
+                    dtype=np.object_,
+                )
+                coalition_target = 0.0
+            else:
+                effective_actions = rollout_fn(coalition_indices)
+                coalition_actions_cache[tuple(sorted(coalition_indices))] = np.array(effective_actions, dtype=np.object_)
+                coalition_target = coalition_env_score(effective_actions, coalition_indices)
+
+            train_tokens = build_qcritic_joint_tokens(
+                tokenizer=self.qcritic_allocator.tokenizer,
+                device=self.mas.qcritic_device,
+                profiles=self.mas.profiles,
+                actions=effective_actions,
+                coalition_indices=coalition_indices,
+                original_problem=original_problem,
+                agent_states=None,
+                include_state=False,
+                max_new_tokens=self.all_args.max_new_tokens,
+            )
+            loss_item = self.qcritic_allocator.update_critic(
+                train_tokens,
+                torch.tensor([coalition_target], device=self.mas.qcritic_device),
+            )
+            coalition_losses.append(float(loss_item))
 
         rewards, debug = self.real_coalition_allocator.allocate(
             actions=actions,
@@ -267,6 +325,16 @@ class MathRunner:
             coalition_has_answer_fn=coalition_has_answer_fn,
             total_score_precomputed=float(global_score),
         )
+        # Surface qcritic training stats to env infos so runner logging can record them
+        qcritic_stats = getattr(self.qcritic_allocator, "last_update_stats", {})
+        if isinstance(qcritic_stats, dict):
+            if qcritic_stats.get("loss", None) is not None:
+                debug["qcritic_loss"] = float(qcritic_stats["loss"])
+            if qcritic_stats.get("grad_norm", None) is not None:
+                debug["qcritic_grad_norm"] = float(qcritic_stats["grad_norm"])
+        if len(coalition_losses) > 0:
+            debug["qcritic_rollout_train_updates"] = int(len(coalition_losses))
+            debug["qcritic_rollout_train_loss_mean"] = float(np.mean(coalition_losses))
         debug["counterfactual_mode"] = "rollout"
         debug["absence_message_template"] = DEFAULT_ABSENCE_MESSAGE_TEMPLATE
         return rewards.tolist(), debug
@@ -323,10 +391,52 @@ class MathRunner:
                 self.writter.add_scalars(k, {k: np.mean(v)}, total_num_steps)
 
     def save(self, steps):
-        """Save the MAS policies and critic networks."""
+        """Save the MAS policies, critic networks, and qcritic value-head (if present)."""
         self.mas.save(self.save_dir, steps)
+        # Trainer.save_optimizers will include qcritic optimizer state under optimizers.pt when applicable
         self.trainer.save_optimizers(self.save_dir, steps)
 
+        # Save qcritic value_head in standalone file.
+        if hasattr(self, "qcritic_allocator") and self.qcritic_allocator is not None:
+            try:
+                exp_path = os.path.join(self.save_dir, "steps_{:04d}".format(steps))
+                qcritic_vh_path = save_qcritic_value_head(self.qcritic_allocator, exp_path)
+                print(f"[MathRunner] qcritic checkpoints saved -> {exp_path}")
+            except Exception as e:
+                print(f"[MathRunner] warning: failed to save qcritic state: {e}")
+
     def restore(self, model_dir):
-        """Restore policy's networks from a saved model."""
-        self.mas.restore(model_dir)
+        """Restore policy's networks from a saved model and load qcritic if present."""
+        # try MAS restore (if implemented)
+        try:
+            self.mas.restore(model_dir)
+        except Exception:
+            pass
+
+        # Attempt to load qcritic value head and optimizer if qcritic allocator exists
+        if hasattr(self, "qcritic_allocator") and self.qcritic_allocator is not None:
+            checkpoint_dir = model_dir
+            # If model_dir is run root, locate the first steps_* dir with qcritic checkpoint.
+            if os.path.isdir(model_dir) and not os.path.exists(os.path.join(model_dir, "qcritic_value_head.pth")):
+                for entry in os.listdir(model_dir):
+                    entry_path = os.path.join(model_dir, entry)
+                    if os.path.isdir(entry_path) and entry.startswith("steps_") and os.path.exists(os.path.join(entry_path, "qcritic_value_head.pth")):
+                        checkpoint_dir = entry_path
+                        break
+
+            try:
+                loaded_value_head, loaded_optimizer = load_qcritic_checkpoint(
+                    self.qcritic_allocator,
+                    checkpoint_dir,
+                    map_location="cpu",
+                )
+                if loaded_value_head:
+                    print(f"[MathRunner] Loaded qcritic value head from {checkpoint_dir}")
+                if loaded_optimizer:
+                    print(f"[MathRunner] Loaded qcritic optimizer from {checkpoint_dir}/optimizers.pt")
+                if not loaded_value_head:
+                    print(f"[MathRunner] no qcritic checkpoint found at {checkpoint_dir}")
+                else:
+                    pass
+            except Exception as e:
+                print(f"[MathRunner] warning: failed to load qcritic state: {e}")

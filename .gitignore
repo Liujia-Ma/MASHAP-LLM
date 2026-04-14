@@ -175,4 +175,5 @@ cython_debug/
 
 code/
 scripts/
-eval/results/
+marft/eval/results/
+marft/eval/*.sh

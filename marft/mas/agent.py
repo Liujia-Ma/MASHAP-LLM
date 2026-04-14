@@ -67,7 +67,21 @@ class Agent:
             )
             self.model = get_peft_model(self.base_model, config)
         else:
-            adapter_path = os.path.join(load_path, self.role)
+            adapter_root = os.path.join(load_path, self.role)
+            # Support both flat checkpoints (.../role/adapter_config.json)
+            # and legacy nested checkpoints (.../role/role/adapter_config.json).
+            flat_cfg = os.path.join(adapter_root, "adapter_config.json")
+            nested_path = os.path.join(adapter_root, self.role)
+            nested_cfg = os.path.join(nested_path, "adapter_config.json")
+            if os.path.exists(flat_cfg):
+                adapter_path = adapter_root
+            elif os.path.exists(nested_cfg):
+                adapter_path = nested_path
+            else:
+                raise FileNotFoundError(
+                    f"Cannot find adapter checkpoint for role='{self.role}'. "
+                    f"Tried: {flat_cfg} and {nested_cfg}"
+                )
             self.model = PeftModel.from_pretrained(
                 self.base_model, adapter_path, adapter_name=self.role
             )

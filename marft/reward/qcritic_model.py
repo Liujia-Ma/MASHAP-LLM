@@ -1,4 +1,5 @@
 import math
+import os
 from typing import Iterable
 
 import torch
@@ -16,11 +17,13 @@ class CentralizedQCritic(nn.Module):
         model_path: str,
         device: str | torch.device,
         *,
-        critic_lr: float = 1e-4,
+        critic_lr: float = 1e-5,
         bf16: bool = True,
+        qcritic_layers: int = 1,
     ):
         super().__init__()
         self.device = torch.device(device) if not isinstance(device, torch.device) else device
+        self.qcritic_layers = qcritic_layers
 
         self.tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=False, padding_side="left")
         if self.tokenizer.pad_token is None:
@@ -44,13 +47,19 @@ class CentralizedQCritic(nn.Module):
         if hidden_size is None:
             raise ValueError("Cannot infer hidden size from backbone config.")
 
-        self.value_head = nn.Sequential(
-            nn.Linear(hidden_size, 1024, bias=False),
-            nn.ReLU(),
-            nn.Linear(1024, 512, bias=False),
-            nn.ReLU(),
-            nn.Linear(512, 1, bias=False),
-        ).to(self.device)
+        if self.qcritic_layers == 3:
+            self.value_head = nn.Sequential(
+                nn.Linear(hidden_size, 1024, bias=False),
+                nn.ReLU(),
+                nn.Linear(1024, 512, bias=False),
+                nn.ReLU(),
+                nn.Linear(512, 1, bias=False),
+            ).to(self.device)
+        else:
+            self.value_head = nn.Sequential(
+                nn.Linear(hidden_size, 1, bias=False),
+            ).to(self.device)
+            
         self.optimizer = torch.optim.Adam(self.value_head.parameters(), lr=critic_lr, eps=1e-5)
         self.mse = nn.MSELoss()
         self.last_update_stats = {"loss": None, "grad_norm": None}
@@ -88,3 +97,31 @@ class CentralizedQCritic(nn.Module):
         loss_item = float(loss.item())
         self.last_update_stats = {"loss": loss_item, "grad_norm": float(grad_norm)}
         return loss_item
+
+    def save_value_head(self, ckpt_path: str) -> None:
+        """
+        Persist only qcritic value-head parameters.
+        """
+        os.makedirs(os.path.dirname(ckpt_path), exist_ok=True)
+        torch.save(self.value_head.state_dict(), ckpt_path)
+
+    def load_value_head(self, ckpt_path: str, map_location: str | torch.device = "cpu") -> None:
+        """
+        Restore qcritic value-head parameters.
+        """
+        state_dict = torch.load(ckpt_path, map_location=map_location)
+        self.value_head.load_state_dict(state_dict, strict=True)
+
+    def save_optimizer(self, ckpt_path: str) -> None:
+        """
+        Persist qcritic optimizer state (legacy standalone path support).
+        """
+        os.makedirs(os.path.dirname(ckpt_path), exist_ok=True)
+        torch.save(self.optimizer.state_dict(), ckpt_path)
+
+    def load_optimizer(self, ckpt_path: str, map_location: str | torch.device = "cpu") -> None:
+        """
+        Restore qcritic optimizer state (legacy standalone path support).
+        """
+        state_dict = torch.load(ckpt_path, map_location=map_location)
+        self.optimizer.load_state_dict(state_dict)

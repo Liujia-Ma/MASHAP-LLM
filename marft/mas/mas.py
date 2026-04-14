@@ -52,6 +52,7 @@ class MAS(ABC):
         self.context_window = context_window
         self.max_new_tokens = max_new_tokens
         self.profiles = load_profiles(profile_path)
+        self.skip_critic_init = bool(kwargs.get("skip_critic_init", False))
 
         # Assign devices for agents
         available_devices = [f"cuda:{i}" for i in range(torch.cuda.device_count())]
@@ -64,16 +65,21 @@ class MAS(ABC):
                 else:
                     profile["device"] = "cpu"
 
-        self.device = self._select_critic_device(
-            available_devices=available_devices,
-            profiles=self.profiles,
-            preferred_device=kwargs.get("critic_device"),
-        )
-        self.qcritic_device = self._select_qcritic_device(
-            available_devices=available_devices,
-            profiles=self.profiles,
-            critic_device=self.device,
-        )
+        if self.skip_critic_init:
+            self.device = _normalize_cuda_device(self.profiles[0].get("device")) if len(self.profiles) > 0 else ("cuda:0" if len(available_devices) > 0 else "cpu")
+            self.qcritic_device = self.device
+            print("[MAS] skip_critic_init=True: skip critic/qcritic device auto assignment.")
+        else:
+            self.device = self._select_critic_device(
+                available_devices=available_devices,
+                profiles=self.profiles,
+                preferred_device=kwargs.get("critic_device"),
+            )
+            self.qcritic_device = self._select_qcritic_device(
+                available_devices=available_devices,
+                profiles=self.profiles,
+                critic_device=self.device,
+            )
         if isinstance(self.device, str) and self.device.startswith("cuda"):
             torch.cuda.set_device(self.device)
 
@@ -85,7 +91,11 @@ class MAS(ABC):
             device_map=device_map,
         )
         self.tokenizer = self.agents[0].tokenizer
-        self.critic = self._init_critic(model_path, load_path).to(self.device)
+        self.critic = None if self.skip_critic_init else self._init_critic(model_path, load_path).to(self.device)
+
+    def _require_critic(self):
+        if self.critic is None:
+            raise RuntimeError("MAS critic is not initialized (skip_critic_init=True).")
 
     def _init_agents(
         self,
@@ -259,7 +269,7 @@ class MAS(ABC):
           "System: The Planner did not participate in this round."
 
         This function is used to estimate v(S) under counterfactual participation
-        settings when reward_allocation == "qcritic_rollout".
+        settings when reward_allocation == "real_coalition".
         """
         rollout_threads, num_agents = obs.shape
         coalition = set(coalition_indices)
@@ -336,6 +346,7 @@ class MAS(ABC):
         Returns:
             action_values: torch.Tensor of shape (rollout_threads, num_agents, 1)
         """
+        self._require_critic()
         rollout_threads, num_agents = obs.shape
         all_values = []
         device = self.critic.device
@@ -364,6 +375,7 @@ class MAS(ABC):
         Returns:
             token_values: torch.Tensor of shape (rollout_threads/batch_size, num_agents, max_new_tokens, data_dim)
         """
+        self._require_critic()
         rollout_threads, num_agents = obs.shape
         all_values = []
         device = self.critic.device
@@ -482,122 +494,122 @@ class MAS(ABC):
             raise NotImplementedError
         return action_log_probs
 
-    # def get_joint_action_log_probs(self, obs: np.ndarray, action_tokens: torch.Tensor, agent_to_train: int | None = None, batch_infer: bool = False):
-    #     """
-    #     Args:
-    #         obs: np.ndarray of shape (rollout_threads/batch_size, num_agents)
-    #         action_tokens: torch.Tensor of shape (rollout_threads/batch_size, num_agents, max_new_tokens)
-
-    #     Return:
-    #         action_log_probs: torch.Tensor of shape (rollout_threads/batch_size, num_agents)
-    #         entropies: torch.Tensor of shape (rollout_threads/batch_size, num_agents)
-    #     """
-    #     logits, _ = self.get_token_logits(obs, action_tokens, agent_index=agent_to_train, batch_infer=batch_infer)
-    #     # pi_logits: shape (rollout_threads/batch_size, num_agents, max_new_tokens, vocab_size)
-    #     pi_log_softmax = torch.log_softmax(logits, dim=-1)
-    #     log_probs = torch.empty(logits.shape[0], logits.shape[1], device=logits.device)
-    #     entropies = torch.empty(logits.shape[0], logits.shape[1], device=logits.device)
-    #     for thread in range(logits.shape[0]):
-    #         for agent_idx in range(self.num_agents):
-    #             if agent_to_train is not None and agent_idx != agent_to_train:
-    #                 continue
-    #             act_token_length = self.get_last_token_position(action_tokens[thread, agent_idx]) + 1
-    #             log_softmax_slice = pi_log_softmax[thread, agent_idx if agent_to_train is None else 0, :act_token_length, :]
-    #             action_token_slice = action_tokens[thread, agent_idx, :act_token_length].to(logits.device)
-    #             token_log_probs = torch.gather(log_softmax_slice, -1, action_token_slice.unsqueeze(-1)).squeeze(-1)
-    #             action_log_prob = self.normalize_log_probs(token_log_probs.sum(), action_token_slice)
-    #             log_probs[thread, agent_idx if agent_to_train is None else 0] = action_log_prob
-    #             entropy = Categorical(logits=logits[thread, agent_idx if agent_to_train is None else 0, :act_token_length, :]).entropy().mean()
-    #             entropies[thread, agent_idx if agent_to_train is None else 0] = entropy
-    #     return log_probs, entropies
     def get_joint_action_log_probs(self, obs: np.ndarray, action_tokens: torch.Tensor, agent_to_train: int | None = None, batch_infer: bool = False):
-        rollout_threads, num_agents = obs.shape
-        
-        # 使用列表收集，保证计算图绝对连续且安全！
-        batch_log_probs = []
-        batch_entropies =[]
+        """
+        Args:
+            obs: np.ndarray of shape (rollout_threads/batch_size, num_agents)
+            action_tokens: torch.Tensor of shape (rollout_threads/batch_size, num_agents, max_new_tokens)
 
-        for agent_idx, agent in enumerate(self.agents):
-            if agent_to_train is not None and agent_idx != agent_to_train:
-                # 如果不是当前要训练的Agent，填充无梯度的0，保持维度对齐
-                batch_log_probs.append(torch.zeros(rollout_threads, device=self.device))
-                batch_entropies.append(torch.zeros(rollout_threads, device=self.device))
-                continue
-            
-            # 1. 准备输入
-            token_seq = self.tokenizer(
-                obs[:, agent_idx].tolist(), return_tensors="pt", padding=True, max_length=self.context_window, truncation=True
-            )
-            obs_input_ids = token_seq["input_ids"].to(agent.device)
-            obs_attn_mask = token_seq["attention_mask"].to(agent.device)
-            obs_full_lengths = obs_input_ids.shape[1]
-
-            act_attn_mask = (action_tokens[:, agent_idx] != self.tokenizer.pad_token_id).to(agent.device)
-            act_real_lengths = act_attn_mask.sum(dim=-1, keepdim=True)
-
-            obs_act_ids = torch.cat([obs_input_ids, action_tokens[:, agent_idx].to(agent.device)], dim=-1)
-            obs_act_mask = torch.cat([obs_attn_mask, act_attn_mask], dim=-1)
-
-            # 【终极防爆墙 1】：绝对禁止任何越界ID进入大模型，防止 Embedding backward 崩溃！
-            # vocab_size = agent.model.config.vocab_size
-            # 【替换为】：获取最底层的物理矩阵大小，绝对不可能越界
-            vocab_size = agent.model.get_input_embeddings().weight.shape[0]
-            obs_act_ids = torch.clamp(obs_act_ids, min=0, max=vocab_size - 1)
-
-            # 2. 前向传播
-            pi_outputs = agent.model(input_ids=obs_act_ids, attention_mask=obs_act_mask)
-            
-            # 切片提取属于 action 的 Logits
-            action_len = action_tokens.shape[2]
-            agent_logits = pi_outputs.logits[:, obs_full_lengths - 1 : obs_full_lengths - 1 + action_len, :]
-            agent_logits = agent_logits.unsqueeze(1) # 补齐维度 ->[Batch, 1, action_len, Vocab]
-            
-            # pi_log_softmax = torch.log_softmax(agent_logits, dim=-1)
-            pi_log_softmax = torch.log_softmax(agent_logits.to(torch.float32), dim=-1)
-
-            # 3. 逐个线程提取概率
-            thread_log_probs = []
-            thread_entropies =[]
-
-            for thread in range(rollout_threads):
-                act_token_length = self.get_last_token_position(action_tokens[thread, agent_idx]) + 1
-                
-                # 【终极防爆墙 2】：如果是纯哑巴输出，强行赋予一个带梯度的虚拟值0，防止除以0产生 NaN
-                if act_token_length <= 0:
-                    # 乘以 0.0 保留前向传播图，防止反向传播报错
-                    dummy_zero = (pi_log_softmax[thread, 0, 0, 0] * 0.0).to(self.device)
-                    thread_log_probs.append(dummy_zero)
-                    thread_entropies.append(dummy_zero)
+        Return:
+            action_log_probs: torch.Tensor of shape (rollout_threads/batch_size, num_agents)
+            entropies: torch.Tensor of shape (rollout_threads/batch_size, num_agents)
+        """
+        logits, _ = self.get_token_logits(obs, action_tokens, agent_index=agent_to_train, batch_infer=batch_infer)
+        # pi_logits: shape (rollout_threads/batch_size, num_agents, max_new_tokens, vocab_size)
+        pi_log_softmax = torch.log_softmax(logits, dim=-1)
+        log_probs = torch.empty(logits.shape[0], logits.shape[1], device=logits.device)
+        entropies = torch.empty(logits.shape[0], logits.shape[1], device=logits.device)
+        for thread in range(logits.shape[0]):
+            for agent_idx in range(self.num_agents):
+                if agent_to_train is not None and agent_idx != agent_to_train:
                     continue
-
-                log_softmax_slice = pi_log_softmax[thread, 0, :act_token_length, :]
-                action_token_slice = action_tokens[thread, agent_idx, :act_token_length].to(agent.device)
-
-                # 【终极防爆墙 3】：保证 gather 索引不越界
-                action_token_slice = torch.clamp(action_token_slice, min=0, max=vocab_size - 1)
-
+                act_token_length = self.get_last_token_position(action_tokens[thread, agent_idx]) + 1
+                log_softmax_slice = pi_log_softmax[thread, agent_idx if agent_to_train is None else 0, :act_token_length, :]
+                action_token_slice = action_tokens[thread, agent_idx, :act_token_length].to(logits.device)
                 token_log_probs = torch.gather(log_softmax_slice, -1, action_token_slice.unsqueeze(-1)).squeeze(-1)
-                
-                # 【终极防爆墙 4】：强制归一化除数最小为1，杜绝 NaN 毒害显存
                 action_log_prob = self.normalize_log_probs(token_log_probs.sum(), action_token_slice)
-                entropy = Categorical(logits=agent_logits[thread, 0, :act_token_length, :]).entropy().mean()
+                log_probs[thread, agent_idx if agent_to_train is None else 0] = action_log_prob
+                entropy = Categorical(logits=logits[thread, agent_idx if agent_to_train is None else 0, :act_token_length, :]).entropy().mean()
+                entropies[thread, agent_idx if agent_to_train is None else 0] = entropy
+        return log_probs, entropies
+    # def get_joint_action_log_probs(self, obs: np.ndarray, action_tokens: torch.Tensor, agent_to_train: int | None = None, batch_infer: bool = False):
+    #     rollout_threads, num_agents = obs.shape
+        
+    #     # 使用列表收集，保证计算图绝对连续且安全！
+    #     batch_log_probs = []
+    #     batch_entropies =[]
 
-                thread_log_probs.append(action_log_prob.to(self.device))
-                thread_entropies.append(entropy.to(self.device))
+    #     for agent_idx, agent in enumerate(self.agents):
+    #         if agent_to_train is not None and agent_idx != agent_to_train:
+    #             # 如果不是当前要训练的Agent，填充无梯度的0，保持维度对齐
+    #             batch_log_probs.append(torch.zeros(rollout_threads, device=self.device))
+    #             batch_entropies.append(torch.zeros(rollout_threads, device=self.device))
+    #             continue
+            
+    #         # 1. 准备输入
+    #         token_seq = self.tokenizer(
+    #             obs[:, agent_idx].tolist(), return_tensors="pt", padding=True, max_length=self.context_window, truncation=True
+    #         )
+    #         obs_input_ids = token_seq["input_ids"].to(agent.device)
+    #         obs_attn_mask = token_seq["attention_mask"].to(agent.device)
+    #         obs_full_lengths = obs_input_ids.shape[1]
 
-            # 合并当前 Agent 在所有 Thread 上的结果
-            batch_log_probs.append(torch.stack(thread_log_probs))
-            batch_entropies.append(torch.stack(thread_entropies))
+    #         act_attn_mask = (action_tokens[:, agent_idx] != self.tokenizer.pad_token_id).to(agent.device)
+    #         act_real_lengths = act_attn_mask.sum(dim=-1, keepdim=True)
 
-            # 4. 手动清理显存
-            del pi_outputs, agent_logits, pi_log_softmax
-            torch.cuda.empty_cache()
+    #         obs_act_ids = torch.cat([obs_input_ids, action_tokens[:, agent_idx].to(agent.device)], dim=-1)
+    #         obs_act_mask = torch.cat([obs_attn_mask, act_attn_mask], dim=-1)
 
-        # 将 List[Tensor] 堆叠为最终形状 [Batch, Num_Agents]
-        log_probs_tensor = torch.stack(batch_log_probs, dim=1)
-        entropies_tensor = torch.stack(batch_entropies, dim=1)
+    #         # 【终极防爆墙 1】：绝对禁止任何越界ID进入大模型，防止 Embedding backward 崩溃！
+    #         # vocab_size = agent.model.config.vocab_size
+    #         # 【替换为】：获取最底层的物理矩阵大小，绝对不可能越界
+    #         vocab_size = agent.model.get_input_embeddings().weight.shape[0]
+    #         obs_act_ids = torch.clamp(obs_act_ids, min=0, max=vocab_size - 1)
 
-        return log_probs_tensor, entropies_tensor
+    #         # 2. 前向传播
+    #         pi_outputs = agent.model(input_ids=obs_act_ids, attention_mask=obs_act_mask)
+            
+    #         # 切片提取属于 action 的 Logits
+    #         action_len = action_tokens.shape[2]
+    #         agent_logits = pi_outputs.logits[:, obs_full_lengths - 1 : obs_full_lengths - 1 + action_len, :]
+    #         agent_logits = agent_logits.unsqueeze(1) # 补齐维度 ->[Batch, 1, action_len, Vocab]
+            
+    #         # pi_log_softmax = torch.log_softmax(agent_logits, dim=-1)
+    #         pi_log_softmax = torch.log_softmax(agent_logits.to(torch.float32), dim=-1)
+
+    #         # 3. 逐个线程提取概率
+    #         thread_log_probs = []
+    #         thread_entropies =[]
+
+    #         for thread in range(rollout_threads):
+    #             act_token_length = self.get_last_token_position(action_tokens[thread, agent_idx]) + 1
+                
+    #             # 【终极防爆墙 2】：如果是纯哑巴输出，强行赋予一个带梯度的虚拟值0，防止除以0产生 NaN
+    #             if act_token_length <= 0:
+    #                 # 乘以 0.0 保留前向传播图，防止反向传播报错
+    #                 dummy_zero = (pi_log_softmax[thread, 0, 0, 0] * 0.0).to(self.device)
+    #                 thread_log_probs.append(dummy_zero)
+    #                 thread_entropies.append(dummy_zero)
+    #                 continue
+
+    #             log_softmax_slice = pi_log_softmax[thread, 0, :act_token_length, :]
+    #             action_token_slice = action_tokens[thread, agent_idx, :act_token_length].to(agent.device)
+
+    #             # 【终极防爆墙 3】：保证 gather 索引不越界
+    #             action_token_slice = torch.clamp(action_token_slice, min=0, max=vocab_size - 1)
+
+    #             token_log_probs = torch.gather(log_softmax_slice, -1, action_token_slice.unsqueeze(-1)).squeeze(-1)
+                
+    #             # 【终极防爆墙 4】：强制归一化除数最小为1，杜绝 NaN 毒害显存
+    #             action_log_prob = self.normalize_log_probs(token_log_probs.sum(), action_token_slice)
+    #             entropy = Categorical(logits=agent_logits[thread, 0, :act_token_length, :]).entropy().mean()
+
+    #             thread_log_probs.append(action_log_prob.to(self.device))
+    #             thread_entropies.append(entropy.to(self.device))
+
+    #         # 合并当前 Agent 在所有 Thread 上的结果
+    #         batch_log_probs.append(torch.stack(thread_log_probs))
+    #         batch_entropies.append(torch.stack(thread_entropies))
+
+    #         # 4. 手动清理显存
+    #         del pi_outputs, agent_logits, pi_log_softmax
+    #         torch.cuda.empty_cache()
+
+    #     # 将 List[Tensor] 堆叠为最终形状 [Batch, Num_Agents]
+    #     log_probs_tensor = torch.stack(batch_log_probs, dim=1)
+    #     entropies_tensor = torch.stack(batch_entropies, dim=1)
+
+    #     return log_probs_tensor, entropies_tensor
 
     @torch.no_grad()
     def infer_for_rollout(self, obs, evaluating: bool = False):
@@ -631,6 +643,7 @@ class MAS(ABC):
         Returns:
             values: torch.Tensor of shape (rollout_threads, num_agents, 1)
         """
+        self._require_critic()
         device = next(self.critic.parameters()).device
         token_seq = self.tokenizer(obs[:, 0].tolist(), return_tensors="pt", padding=True)
         input_ids = token_seq["input_ids"].to(device)
@@ -662,16 +675,26 @@ class MAS(ABC):
         exp_path = os.path.join(save_dir, "steps_{:04d}".format(steps))
         os.makedirs(exp_path, exist_ok=True)
         for agent in self.agents:
-            agent.model.save_pretrained(os.path.join(exp_path, agent.role))
+            adapter_save_path = os.path.join(exp_path, agent.role)
+            active_adapter = getattr(agent.model, "active_adapter", None)
+            if active_adapter is not None:
+                agent.model.save_pretrained(
+                    adapter_save_path,
+                    selected_adapters=[active_adapter],
+                )
+            else:
+                agent.model.save_pretrained(adapter_save_path)
         self.critic.save_value_head(os.path.join(exp_path, f"value_head.pth"))
         print(f"[MAS] MAS checkpoints saved → {exp_path}")
 
     def train(self):
         for agent in self.agents:
             agent.train()
-        self.critic.train()
+        if self.critic is not None:
+            self.critic.train()
 
     def eval(self):
         for agent in self.agents:
             agent.eval()
-        self.critic.eval()
+        if self.critic is not None:
+            self.critic.eval()

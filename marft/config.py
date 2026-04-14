@@ -91,7 +91,7 @@ def get_config():
         --huber_delta <float>
             coefficient of huber loss.
 
-    Run parameters：
+    Run parameters:
         --use_linear_lr_decay
             by default, do not apply linear decay to learning rate. If set, use a linear schedule on the learning rate
 
@@ -191,15 +191,11 @@ def get_config():
     parser.add_argument("--kl_threshold", type=float, default=1e-3, help="if kl divergence is greater than this, force no update.")
     
     # reward allocation parameters
-    # NOTE:
-    # - `terminal` keeps the original baseline behavior exactly:
-    #   only the last agent receives the environment score.
-    # - `qcritic_rollout` enables fair credit assignment by allocating the full
-    #   environment score to all agents according to counterfactual rollout-based Shapley values.
-    parser.add_argument("--reward_allocation", type=str, default="terminal", choices=["terminal", "qcritic_rollout", "qcritic_masked"], help="reward allocation strategy. 'terminal' is baseline; 'qcritic_rollout' uses counterfactual rollout + Q-critic valuation; 'qcritic_masked' uses direct Q-critic masked Shapley allocation.")
+    parser.add_argument("--reward_allocation", type=str, default="baseline", choices=["baseline", "real_coalition", "masked_coalition"], help="reward allocation strategy. 'baseline' is baseline; 'real_coalition' uses counterfactual rollout + Q-critic valuation; 'masked_coalition' uses direct Q-critic masked Shapley allocation.")
     parser.add_argument("--clip_value", type=float, default=-1.0, help="clip each Shapley reward to [-clip_value, clip_value] only when > 0; <= 0 disables clipping (default: -1.0).")
     parser.add_argument("--qcritic_lr", type=float, default=1e-5, help="learning rate for masked-coalition Q-critic value head.")
-    parser.add_argument("--mask_token_type", type=str, default="pad-only", choices=["pad-only", "zero", "random", "mean", "semantic-placeholder"], help="token replacement strategy for masked-out agents in qcritic_masked mode.")
+    parser.add_argument("--mask_token_type", type=str, default="pad-only", choices=["pad-only", "zero", "random", "mean", "semantic-placeholder"], help="token replacement strategy for masked-out agents in masked_coalition mode.")
+    parser.add_argument("--qcritic_layers", type=int, default=1, choices=[1, 3], help="number of layers in Q-critic value head; 1 for linear, 3 for deeper MLP.")
 
     # run parameters
     parser.add_argument("--use_linear_lr_decay", action="store_true", default=False, help="use a linear schedule on the learning rate")

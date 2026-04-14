@@ -26,12 +26,13 @@ class MaskedCoalitionShapleyAllocator(nn.Module):
         model_path: str,
         device: str | torch.device,
         *,
-        critic_lr: float = 1e-4,
+        critic_lr: float = 1e-5,
         mask_token_type: str = "pad-only",
         agent_roles: list[str] | None = None,
         absence_message_template: str = "System: The {role} did not participate in this round.",
         clip_value: float = -1.0,
         bf16: bool = True,
+        qcritic_layers: int = 1,
     ):
         super().__init__()
         self.device = torch.device(device) if not isinstance(device, torch.device) else device
@@ -44,6 +45,7 @@ class MaskedCoalitionShapleyAllocator(nn.Module):
             device=self.device,
             critic_lr=critic_lr,
             bf16=bf16,
+            qcritic_layers=qcritic_layers,
         )
         self.tokenizer = self.qcritic.tokenizer
         self.pad_token_id = self.qcritic.pad_token_id

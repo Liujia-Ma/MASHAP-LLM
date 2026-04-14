@@ -62,7 +62,7 @@ class MathEnv:
         dataset_path,
         horizon,
         mode,
-        reward_allocation="terminal",
+        reward_allocation="baseline",
         clip_value=-1.0,
         debug_print_state=False,
     ):
@@ -136,7 +136,7 @@ class MathEnv:
         Inject Q-critic rollout allocator callback.
 
         allocator_fn signature:
-            allocator_fn(actions: np.ndarray[str], base_state: str, global_score: float, original_problem: str) -> tuple[list[float], dict]
+            allocator_fn(actions: np.ndarray[str], base_state: str, global_score: float, original_problem: str, gt: str) -> tuple[list[float], dict]
         """
         self.qcritic_rollout_allocator_fn = allocator_fn
 
@@ -172,43 +172,43 @@ class MathEnv:
 
         next_obs = np.array([self.current_state for _ in range(self.n_agents)], dtype=np.object_)
         
-        if self.reward_allocation == "qcritic_rollout":
+        if self.reward_allocation == "real_coalition":
             if self.qcritic_rollout_allocator_fn is None:
                 raise RuntimeError(
-                    "qcritic_rollout mode requires qcritic_rollout_allocator_fn. "
+                    "real_coalition mode requires qcritic_rollout_allocator_fn. "
                     "Please ensure runner injects it before training."
                 )
-            alloc_out = self.qcritic_rollout_allocator_fn(actions, base_state, float(score), self.problem)
+            alloc_out = self.qcritic_rollout_allocator_fn(actions, base_state, float(score), self.problem, self.label)
             if isinstance(alloc_out, tuple) and len(alloc_out) == 2:
                 rewards, shapley_debug = alloc_out
             else:
                 rewards, shapley_debug = alloc_out, {}
             if not isinstance(shapley_debug, dict):
                 shapley_debug = {}
-            shapley_debug.setdefault("allocation_mode", "qcritic_rollout")
+            shapley_debug.setdefault("allocation_mode", "real_coalition")
             shapley_debug.setdefault("total_score", float(score))
             shapley_debug.setdefault("counterfactual_mode", "rollout")
             shapley_debug.setdefault("absence_message_template", DEFAULT_ABSENCE_MESSAGE_TEMPLATE)
-        elif self.reward_allocation == "qcritic_masked":
+        elif self.reward_allocation == "masked_coalition":
             if self.qcritic_masked_allocator_fn is None:
                 raise RuntimeError(
-                    "qcritic_masked mode requires qcritic_masked_allocator_fn. "
+                    "masked_coalition mode requires qcritic_masked_allocator_fn. "
                     "Please ensure runner injects it before training."
                 )
             alloc_out = self.qcritic_masked_allocator_fn(actions, float(score), self.problem, base_state)
             if isinstance(alloc_out, tuple) and len(alloc_out) == 2:
-                rewards, sr_stats = alloc_out
+                rewards, qcritic_stats = alloc_out
             else:
-                rewards, sr_stats = alloc_out, {}
-            shapley_debug = {"allocation_mode": "qcritic_masked", "total_score": float(score)}
-            if isinstance(sr_stats, dict):
-                if sr_stats.get("loss", None) is not None:
-                    shapley_debug["qcritic_loss"] = float(sr_stats["loss"])
-                if sr_stats.get("grad_norm", None) is not None:
-                    shapley_debug["qcritic_grad_norm"] = float(sr_stats["grad_norm"])
+                rewards, qcritic_stats = alloc_out, {}
+            shapley_debug = {"allocation_mode": "masked_coalition", "total_score": float(score)}
+            if isinstance(qcritic_stats, dict):
+                if qcritic_stats.get("loss", None) is not None:
+                    shapley_debug["qcritic_loss"] = float(qcritic_stats["loss"])
+                if qcritic_stats.get("grad_norm", None) is not None:
+                    shapley_debug["qcritic_grad_norm"] = float(qcritic_stats["grad_norm"])
         else:
             rewards = [0 if idx != self.n_agents - 1 else score for idx in range(self.n_agents)]
-            shapley_debug = {"allocation_mode": "terminal", "total_score": float(score)}
+            shapley_debug = {"allocation_mode": "baseline", "total_score": float(score)}
         
         infos = {
             "state": self.current_state,

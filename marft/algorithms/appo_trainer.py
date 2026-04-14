@@ -214,6 +214,11 @@ class APPOTrainer(ABC):
                     for role, opt in self.policy_optimizer.items()
                 },
                 "critic_opt_state": self.critic_optimizer.state_dict(),
+                "qcritic_opt_state": (
+                    self.mas.qcritic_allocator.qcritic.optimizer.state_dict()
+                    if getattr(self.mas, "qcritic_allocator", None) is not None
+                    else None
+                ),
             },
             os.path.join(exp_path, f"optimizers.pt"),
         )
@@ -225,6 +230,13 @@ class APPOTrainer(ABC):
             # The trainer’s __init__ already created the corresponding optimizer.
             self.policy_optimizer[role].load_state_dict(opt_state)
         self.critic_optimizer.load_state_dict(ckpt["critic_opt_state"])
+        qcritic_opt = ckpt.get("qcritic_opt_state", None)
+        if qcritic_opt is not None:
+            if getattr(self.mas, "qcritic_allocator", None) is not None:
+                self.mas.qcritic_allocator.qcritic.optimizer.load_state_dict(qcritic_opt)
+            else:
+                # allocator may be created after trainer init in runner
+                self.mas._pending_qcritic_opt_state = qcritic_opt
         print(f"[APPOTrainer] optimizer states loaded <- {path}")
 
     def prep_training(self):
