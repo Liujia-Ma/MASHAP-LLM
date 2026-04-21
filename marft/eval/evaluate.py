@@ -1,5 +1,6 @@
 import argparse
 import sys
+import numbers
 sys.path.append("../../")
 from marft.mas import MAS
 from marft.eval.evaluators import MathEvaluator
@@ -46,6 +47,7 @@ def main():
     evaluator_cls = EVALUATOR_MAP[args.evaluator_type]
     
     mas = MAS(**vars(args), skip_critic_init=True)
+    print(f"✅ Successfully loaded LoRA from path: {args.lora_path}")
     
     evaluator = evaluator_cls(
         mas=mas,
@@ -63,7 +65,10 @@ def main():
     # 输出结果
     print("\n评估结果:")
     for k, v in metrics.items():
-        print(f"{k}: {v:.4f}")
+        if isinstance(v, numbers.Real):
+            print(f"{k}: {float(v):.4f}")
+        else:
+            print(f"{k}: {v}")
 
 if __name__ == '__main__':
     main()

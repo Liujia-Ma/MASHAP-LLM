@@ -5,105 +5,97 @@ from typing import Iterable, Sequence
 
 import torch
 
-from marft.reward import MaskedCoalitionShapleyAllocator, RealCoalitionShapleyAllocator
+from marft.critics import CounterfactualEstimator
+from marft.reward import LLMShapAllocator, PureShapleyAllocator
 
 DEFAULT_ABSENCE_MESSAGE_TEMPLATE = "System: The {role} did not participate in this round."
 
 
-def _build_qcritic_allocator(all_args, mas) -> MaskedCoalitionShapleyAllocator:
-    return MaskedCoalitionShapleyAllocator(
+def build_llmshap_estimator(all_args, mas) -> CounterfactualEstimator:
+    llmshap_device = mas.get_llmshap_device()
+    return CounterfactualEstimator(
         model_path=all_args.model_name_or_path,
-        device=mas.qcritic_device,
-        critic_lr=all_args.qcritic_lr,
-        mask_token_type=all_args.mask_token_type,
-        agent_roles=[p["role"] for p in mas.profiles],
-        absence_message_template=DEFAULT_ABSENCE_MESSAGE_TEMPLATE,
-        clip_value=all_args.clip_value,
-        qcritic_layers=all_args.qcritic_layers,
+        device=llmshap_device,
+        critic_lr=all_args.llmshap_lr,
+        llmshap_layers=all_args.llmshap_layers,
     )
 
 
-def build_masked_coalition_allocator(all_args, mas) -> MaskedCoalitionShapleyAllocator:
-    return _build_qcritic_allocator(all_args, mas)
+def build_llmshap_allocator() -> LLMShapAllocator:
+    return LLMShapAllocator()
 
 
-def build_rollout_qcritic_allocator(all_args, mas) -> MaskedCoalitionShapleyAllocator:
-    return _build_qcritic_allocator(all_args, mas)
+def build_pureshap_allocator() -> PureShapleyAllocator:
+    return PureShapleyAllocator()
 
 
-def build_real_coalition_allocator(all_args) -> RealCoalitionShapleyAllocator:
-    return RealCoalitionShapleyAllocator(
-        clip_value=all_args.clip_value,
-    )
-
-
-def register_qcritic_allocator_on_mas(mas, allocator: MaskedCoalitionShapleyAllocator) -> None:
+def register_llmshap_estimator_on_mas(mas, estimator: CounterfactualEstimator) -> None:
     """
-    Expose qcritic allocator on MAS so trainer-level optimizer checkpointing can
-    include qcritic optimizer state in optimizers.pt.
+    Expose llmshap estimator on MAS so trainer-level optimizer checkpointing can
+    include llmshap optimizer state in optimizers.pt.
     """
-    mas.qcritic_allocator = allocator
-    # If trainer loaded optimizers before allocator existed, apply deferred qcritic state now.
-    pending_qcritic_opt_state = getattr(mas, "_pending_qcritic_opt_state", None)
-    if pending_qcritic_opt_state is not None:
+    mas.llmshap_estimator = estimator
+    # If trainer loaded optimizers before allocator existed, apply deferred llmshap state now.
+    pending_llmshap_opt_state = getattr(mas, "_pending_llmshap_opt_state", None)
+    if pending_llmshap_opt_state is not None:
         try:
-            allocator.qcritic.optimizer.load_state_dict(pending_qcritic_opt_state)
-            print("[QCritic] Applied deferred optimizer state from optimizers.pt")
-            mas._pending_qcritic_opt_state = None
+            estimator.critic_network.optimizer.load_state_dict(pending_llmshap_opt_state)
+            print("[LLMShap] Applied deferred optimizer state from optimizers.pt")
+            mas._pending_llmshap_opt_state = None
         except Exception as e:
-            print(f"[QCritic] warning: failed to apply deferred optimizer state: {e}")
+            print(f"[LLMShap] warning: failed to apply deferred optimizer state: {e}")
 
 
-def save_qcritic_value_head(allocator: MaskedCoalitionShapleyAllocator, checkpoint_dir: str) -> str:
+def save_llmshap_value_head(estimator: CounterfactualEstimator, checkpoint_dir: str) -> str:
     """
-    Save qcritic value-head weights to a standalone file.
+    Save llmshap value-head weights to a standalone file.
     """
     os.makedirs(checkpoint_dir, exist_ok=True)
-    qcritic_value_head_path = os.path.join(checkpoint_dir, "qcritic_value_head.pth")
-    allocator.qcritic.save_value_head(qcritic_value_head_path)
-    return qcritic_value_head_path
+    llmshap_value_head_path = os.path.join(checkpoint_dir, "llmshap_value_head.pth")
+    estimator.critic_network.save_value_head(llmshap_value_head_path)
+    return llmshap_value_head_path
 
 
-def load_qcritic_checkpoint(
-    allocator: MaskedCoalitionShapleyAllocator,
+def load_llmshap_checkpoint(
+    estimator: CounterfactualEstimator,
     checkpoint_dir: str,
     *,
     map_location: str | torch.device = "cpu",
 ) -> tuple[bool, bool]:
     """
-    Load qcritic state from a checkpoint directory.
+    Load llmshap state from a checkpoint directory.
 
     Returns:
         (loaded_value_head, loaded_optimizer)
     """
-    qcritic = allocator.qcritic
-    value_head_path = os.path.join(checkpoint_dir, "qcritic_value_head.pth")
+    llmshap = estimator.critic_network
+    value_head_path = os.path.join(checkpoint_dir, "llmshap_value_head.pth")
     optimizers_path = os.path.join(checkpoint_dir, "optimizers.pt")
-    legacy_optimizer_path = os.path.join(checkpoint_dir, "qcritic_optimizer.pt")
+    legacy_optimizer_path = os.path.join(checkpoint_dir, "llmshap_optimizer.pt")
 
     loaded_value_head = False
     loaded_optimizer = False
 
     if os.path.exists(value_head_path):
-        qcritic.load_value_head(value_head_path, map_location=map_location)
+        llmshap.load_value_head(value_head_path, map_location=map_location)
         loaded_value_head = True
 
     if os.path.exists(optimizers_path):
         ckpt = torch.load(optimizers_path, map_location=map_location)
-        qcritic_opt_state = ckpt.get("qcritic_opt_state", None)
-        if qcritic_opt_state is not None:
-            qcritic.optimizer.load_state_dict(qcritic_opt_state)
+        llmshap_opt_state = ckpt.get("llmshap_opt_state", None)
+        if llmshap_opt_state is not None:
+            llmshap.optimizer.load_state_dict(llmshap_opt_state)
             loaded_optimizer = True
 
     # Backward compatibility for older runs that saved standalone optimizer file.
     if (not loaded_optimizer) and os.path.exists(legacy_optimizer_path):
-        qcritic.load_optimizer(legacy_optimizer_path, map_location=map_location)
+        llmshap.load_optimizer(legacy_optimizer_path, map_location=map_location)
         loaded_optimizer = True
 
     return loaded_value_head, loaded_optimizer
 
 
-def build_qcritic_joint_tokens(
+def build_llmshap_joint_tokens(
     *,
     tokenizer,
     device: torch.device,

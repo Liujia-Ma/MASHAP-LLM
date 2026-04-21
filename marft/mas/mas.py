@@ -35,6 +35,7 @@ class MAS(ABC):
             max_new_tokens: int, 
             num_agents: int, 
             profile_path: str | os.PathLike,
+            experiment_mode: str = "baseline",
             algo: str = "APPO", 
             normalization_mode: str = "sum",
             load_path: str = None,
@@ -52,7 +53,13 @@ class MAS(ABC):
         self.context_window = context_window
         self.max_new_tokens = max_new_tokens
         self.profiles = load_profiles(profile_path)
+        self.experiment_mode = str(experiment_mode)
         self.skip_critic_init = bool(kwargs.get("skip_critic_init", False))
+        self.enable_llmshap_model = (
+            (not self.skip_critic_init)
+            and self.experiment_mode == "llmshap"
+        )
+        self.llmshap_device = None
 
         # Assign devices for agents
         available_devices = [f"cuda:{i}" for i in range(torch.cuda.device_count())]
@@ -67,19 +74,19 @@ class MAS(ABC):
 
         if self.skip_critic_init:
             self.device = _normalize_cuda_device(self.profiles[0].get("device")) if len(self.profiles) > 0 else ("cuda:0" if len(available_devices) > 0 else "cpu")
-            self.qcritic_device = self.device
-            print("[MAS] skip_critic_init=True: skip critic/qcritic device auto assignment.")
+            print("[MAS] skip_critic_init=True: skip critic/llmshap device auto assignment.")
         else:
             self.device = self._select_critic_device(
                 available_devices=available_devices,
                 profiles=self.profiles,
                 preferred_device=kwargs.get("critic_device"),
             )
-            self.qcritic_device = self._select_qcritic_device(
-                available_devices=available_devices,
-                profiles=self.profiles,
-                critic_device=self.device,
-            )
+            if self.enable_llmshap_model:
+                self.llmshap_device = self._select_llmshap_device(
+                    available_devices=available_devices,
+                    profiles=self.profiles,
+                    critic_device=self.device,
+                )
         if isinstance(self.device, str) and self.device.startswith("cuda"):
             torch.cuda.set_device(self.device)
 
@@ -96,6 +103,16 @@ class MAS(ABC):
     def _require_critic(self):
         if self.critic is None:
             raise RuntimeError("MAS critic is not initialized (skip_critic_init=True).")
+
+    def get_llmshap_device(self) -> str:
+        if not self.enable_llmshap_model:
+            raise RuntimeError(
+                "LLMShap device requested while LLMShap model is disabled "
+                f"(experiment_mode={self.experiment_mode}, skip_critic_init={self.skip_critic_init})."
+            )
+        if self.llmshap_device is None:
+            raise RuntimeError("LLMShap model is enabled but llmshap_device is not set.")
+        return self.llmshap_device
 
     def _init_agents(
         self,
@@ -176,9 +193,9 @@ class MAS(ABC):
             print(f"Load critic from {critic_path}")
         return critic
 
-    def _select_qcritic_device(self, available_devices, profiles, critic_device):
+    def _select_llmshap_device(self, available_devices, profiles, critic_device):
         if len(available_devices) == 0:
-            print("[MAS] no CUDA device found, qcritic assigned to cpu.")
+            print("[MAS] no CUDA device found, llmshap assigned to cpu.")
             return "cpu"
 
         used_cuda = set()
@@ -193,10 +210,10 @@ class MAS(ABC):
 
         for dev in available_devices:
             if dev not in used_cuda:
-                print(f"[MAS] qcritic assigned to remaining CUDA device: {dev}")
+                print(f"[MAS] llmshap assigned to remaining CUDA device: {dev}")
                 return dev
 
-        print(f"[MAS] no remaining CUDA device after agent->critic placement; qcritic assigned to {critic_dev}.")
+        print(f"[MAS] no remaining CUDA device after agent->critic placement; llmshap assigned to {critic_dev}.")
         return critic_dev if critic_dev is not None else available_devices[0]
 
     @torch.no_grad()
@@ -269,7 +286,7 @@ class MAS(ABC):
           "System: The Planner did not participate in this round."
 
         This function is used to estimate v(S) under counterfactual participation
-        settings when reward_allocation == "real_coalition".
+        settings when experiment_mode is "llmshap" or "pureshap".
         """
         rollout_threads, num_agents = obs.shape
         coalition = set(coalition_indices)

@@ -1,9 +1,7 @@
-from .masked_coalition_shapley_allocator import MaskedCoalitionShapleyAllocator
-from .real_coalition_shapley_allocator import RealCoalitionShapleyAllocator
-from .qcritic_model import CentralizedQCritic
+from .llmshap_allocator import LLMShapAllocator
+from .pureshap_allocator import PureShapleyAllocator
 
 __all__ = [
-    "MaskedCoalitionShapleyAllocator",
-    "RealCoalitionShapleyAllocator",
-    "CentralizedQCritic",
+    "LLMShapAllocator",
+    "PureShapleyAllocator",
 ]

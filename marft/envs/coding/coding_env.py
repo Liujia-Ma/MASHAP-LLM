@@ -30,8 +30,7 @@ class CodingEnv:
         horizon,
         mode,
         seed=None,
-        reward_allocation="baseline",
-        clip_value=-1.0,
+        experiment_mode="baseline",
         debug_print_state=False,
     ):
         
@@ -49,11 +48,9 @@ class CodingEnv:
         # Reward allocation config:
         # - terminal: original baseline behavior
         # - shapley: allocate reward by marginal contribution
-        self.reward_allocation = reward_allocation
-        self.clip_value = clip_value
+        self.experiment_mode = experiment_mode
         self.debug_print_state = debug_print_state
-        self.qcritic_masked_allocator_fn = None
-        self.qcritic_rollout_allocator_fn = None
+        self.llmshap_rollout_allocator_fn = None
         
         self.problem = None
         self.label = None
@@ -87,23 +84,14 @@ class CodingEnv:
         self.step_count = 0
         return obs
     
-    def set_qcritic_masked_allocator_fn(self, allocator_fn):
-        """
-        Inject Q-critic masked allocator callback.
-
-        allocator_fn signature:
-            allocator_fn(actions: np.ndarray[str], global_score: float, original_problem: str, agent_states: str) -> list[float]
-        """
-        self.qcritic_masked_allocator_fn = allocator_fn
-
-    def set_qcritic_rollout_allocator_fn(self, allocator_fn):
+    def set_llmshap_rollout_allocator_fn(self, allocator_fn):
         """
         Inject Q-critic rollout allocator callback.
 
         allocator_fn signature:
             allocator_fn(actions: np.ndarray[str], base_state: str, global_score: float, original_problem: str, gt) -> tuple[list[float], dict]
         """
-        self.qcritic_rollout_allocator_fn = allocator_fn
+        self.llmshap_rollout_allocator_fn = allocator_fn
 
     def _score_terminal(self, actions) -> float:
         """
@@ -123,7 +111,7 @@ class CodingEnv:
         self.step_count += 1
         base_state = self.current_state
         self.state_transition(actions)
-        # Global score should stay consistent across all reward_allocation modes.
+        # Global score should stay consistent across all experiment_mode modes.
         score = self._score_terminal(actions)
         
         if score > 0.0 or self.step_count >= self.max_steps:
@@ -143,48 +131,36 @@ class CodingEnv:
             )
 
         next_obs = np.array([self.current_state for _ in range(self.n_agents)], dtype=np.object_)
-        if self.reward_allocation == "real_coalition":
-            if self.qcritic_rollout_allocator_fn is None:
+        if self.experiment_mode in ("llmshap", "pureshap"):
+            if self.llmshap_rollout_allocator_fn is None:
                 raise RuntimeError(
-                    "real_coalition mode requires qcritic_rollout_allocator_fn. "
+                    f"{self.experiment_mode} mode requires llmshap_rollout_allocator_fn. "
                     "Please ensure runner injects it before training."
                 )
-            alloc_out = self.qcritic_rollout_allocator_fn(actions, base_state, float(score), self.problem, self.label)
+            alloc_out = self.llmshap_rollout_allocator_fn(actions, base_state, float(score), self.problem, self.label)
             if isinstance(alloc_out, tuple) and len(alloc_out) == 2:
                 rewards, shapley_debug = alloc_out
             else:
                 rewards, shapley_debug = alloc_out, {}
             if not isinstance(shapley_debug, dict):
                 shapley_debug = {}
-            shapley_debug.setdefault("allocation_mode", "real_coalition")
+            shapley_debug.setdefault("allocation_mode", self.experiment_mode)
             shapley_debug.setdefault("total_score", float(score))
             shapley_debug.setdefault("counterfactual_mode", "rollout")
             shapley_debug.setdefault("absence_message_template", DEFAULT_ABSENCE_MESSAGE_TEMPLATE)
-        elif self.reward_allocation == "masked_coalition":
-            if self.qcritic_masked_allocator_fn is None:
-                raise RuntimeError(
-                    "masked_coalition mode requires qcritic_masked_allocator_fn. "
-                    "Please ensure runner injects it before training."
-                )
-            alloc_out = self.qcritic_masked_allocator_fn(actions, float(score), self.problem, base_state)
-            if isinstance(alloc_out, tuple) and len(alloc_out) == 2:
-                rewards, qcritic_stats = alloc_out
-            else:
-                rewards, qcritic_stats = alloc_out, {}
-            shapley_debug = {"allocation_mode": "masked_coalition", "total_score": float(score)}
-            if isinstance(qcritic_stats, dict):
-                if qcritic_stats.get("loss", None) is not None:
-                    shapley_debug["qcritic_loss"] = float(qcritic_stats["loss"])
-                if qcritic_stats.get("grad_norm", None) is not None:
-                    shapley_debug["qcritic_grad_norm"] = float(qcritic_stats["grad_norm"])
-        else:
+        elif self.experiment_mode == "baseline":
             rewards = [0 if idx != self.n_agents - 1 else score for idx in range(self.n_agents)]
             shapley_debug = {"allocation_mode": "baseline", "total_score": float(score)}
+        else:
+            raise ValueError(
+                f"Unknown experiment_mode={self.experiment_mode}. "
+                "Supported modes: baseline, llmshap, pureshap."
+            )
         infos = {
             "state": self.current_state,
             "gt": self.label,
             "episodic_return": score,
-            "reward_allocation": self.reward_allocation,
+            "experiment_mode": self.experiment_mode,
             "reward_vector": rewards,
             **shapley_debug,
         }
