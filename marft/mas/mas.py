@@ -35,6 +35,9 @@ class MAS(ABC):
             max_new_tokens: int, 
             num_agents: int, 
             profile_path: str | os.PathLike,
+            do_sample: bool = True,
+            top_k: int = 50,
+            temperature: float = 0.5,
             experiment_mode: str = "baseline",
             algo: str = "APPO", 
             normalization_mode: str = "sum",
@@ -52,6 +55,9 @@ class MAS(ABC):
 
         self.context_window = context_window
         self.max_new_tokens = max_new_tokens
+        self.do_sample = bool(do_sample)
+        self.top_k = int(top_k)
+        self.temperature = float(temperature)
         self.profiles = load_profiles(profile_path)
         self.experiment_mode = str(experiment_mode)
         self.skip_critic_init = bool(kwargs.get("skip_critic_init", False))
@@ -249,9 +255,9 @@ class MAS(ABC):
             output = self.agents[agent_idx].generate(
                 input_ids,
                 attention_mask=attn_mask,
-                do_sample=True,
-                top_k=50,
-                temperature=0.5,
+                do_sample=self.do_sample,
+                top_k=self.top_k,
+                temperature=self.temperature,
                 max_new_tokens=self.max_new_tokens,
                 eos_token_id=self.tokenizer.eos_token_id,
                 pad_token_id=self.tokenizer.pad_token_id,
@@ -313,9 +319,9 @@ class MAS(ABC):
             output = self.agents[agent_idx].generate(
                 input_ids,
                 attention_mask=attn_mask,
-                do_sample=True,
-                top_k=50,
-                temperature=0.5,
+                do_sample=self.do_sample,
+                top_k=self.top_k,
+                temperature=self.temperature,
                 max_new_tokens=self.max_new_tokens,
                 eos_token_id=self.tokenizer.eos_token_id,
                 pad_token_id=self.tokenizer.pad_token_id,
@@ -455,14 +461,14 @@ class MAS(ABC):
             obs_act_ids = torch.cat([obs_input_ids, action_tokens[:, agent_idx].to(agent.device)], dim=-1)
             obs_act_mask = torch.cat([obs_attn_mask, act_attn_mask], dim=-1)
 
-            with torch.no_grad():
-                rho_outputs = agent.model(input_ids=obs_act_ids, attention_mask=obs_act_mask)
-                rho_logits.append(self.get_slice(rho_outputs.logits, obs_full_lengths, act_real_lengths).to(self.device))
+            # with torch.no_grad():
+            #     rho_outputs = agent.model(input_ids=obs_act_ids, attention_mask=obs_act_mask)
+            #     rho_logits.append(self.get_slice(rho_outputs.logits, obs_full_lengths, act_real_lengths).to(self.device))
             pi_outputs = agent.model(input_ids=obs_act_ids, attention_mask=obs_act_mask)
             pi_logits.append(self.get_slice(pi_outputs.logits, obs_full_lengths, act_real_lengths).to(self.device))
-        rho_logits = torch.cat(rho_logits, dim=1)
+        # rho_logits = torch.cat(rho_logits, dim=1)
         pi_logits = torch.cat(pi_logits, dim=1)
-        return pi_logits, rho_logits
+        return pi_logits, None
 
     @torch.no_grad()
     def batch_infer(self, model, input_ids, attn_mask, obs_full_lengths, act_real_lengths, infer_batch_size=16,):
@@ -539,94 +545,6 @@ class MAS(ABC):
                 entropy = Categorical(logits=logits[thread, agent_idx if agent_to_train is None else 0, :act_token_length, :]).entropy().mean()
                 entropies[thread, agent_idx if agent_to_train is None else 0] = entropy
         return log_probs, entropies
-    # def get_joint_action_log_probs(self, obs: np.ndarray, action_tokens: torch.Tensor, agent_to_train: int | None = None, batch_infer: bool = False):
-    #     rollout_threads, num_agents = obs.shape
-        
-    #     # 使用列表收集，保证计算图绝对连续且安全！
-    #     batch_log_probs = []
-    #     batch_entropies =[]
-
-    #     for agent_idx, agent in enumerate(self.agents):
-    #         if agent_to_train is not None and agent_idx != agent_to_train:
-    #             # 如果不是当前要训练的Agent，填充无梯度的0，保持维度对齐
-    #             batch_log_probs.append(torch.zeros(rollout_threads, device=self.device))
-    #             batch_entropies.append(torch.zeros(rollout_threads, device=self.device))
-    #             continue
-            
-    #         # 1. 准备输入
-    #         token_seq = self.tokenizer(
-    #             obs[:, agent_idx].tolist(), return_tensors="pt", padding=True, max_length=self.context_window, truncation=True
-    #         )
-    #         obs_input_ids = token_seq["input_ids"].to(agent.device)
-    #         obs_attn_mask = token_seq["attention_mask"].to(agent.device)
-    #         obs_full_lengths = obs_input_ids.shape[1]
-
-    #         act_attn_mask = (action_tokens[:, agent_idx] != self.tokenizer.pad_token_id).to(agent.device)
-    #         act_real_lengths = act_attn_mask.sum(dim=-1, keepdim=True)
-
-    #         obs_act_ids = torch.cat([obs_input_ids, action_tokens[:, agent_idx].to(agent.device)], dim=-1)
-    #         obs_act_mask = torch.cat([obs_attn_mask, act_attn_mask], dim=-1)
-
-    #         # 【终极防爆墙 1】：绝对禁止任何越界ID进入大模型，防止 Embedding backward 崩溃！
-    #         # vocab_size = agent.model.config.vocab_size
-    #         # 【替换为】：获取最底层的物理矩阵大小，绝对不可能越界
-    #         vocab_size = agent.model.get_input_embeddings().weight.shape[0]
-    #         obs_act_ids = torch.clamp(obs_act_ids, min=0, max=vocab_size - 1)
-
-    #         # 2. 前向传播
-    #         pi_outputs = agent.model(input_ids=obs_act_ids, attention_mask=obs_act_mask)
-            
-    #         # 切片提取属于 action 的 Logits
-    #         action_len = action_tokens.shape[2]
-    #         agent_logits = pi_outputs.logits[:, obs_full_lengths - 1 : obs_full_lengths - 1 + action_len, :]
-    #         agent_logits = agent_logits.unsqueeze(1) # 补齐维度 ->[Batch, 1, action_len, Vocab]
-            
-    #         # pi_log_softmax = torch.log_softmax(agent_logits, dim=-1)
-    #         pi_log_softmax = torch.log_softmax(agent_logits.to(torch.float32), dim=-1)
-
-    #         # 3. 逐个线程提取概率
-    #         thread_log_probs = []
-    #         thread_entropies =[]
-
-    #         for thread in range(rollout_threads):
-    #             act_token_length = self.get_last_token_position(action_tokens[thread, agent_idx]) + 1
-                
-    #             # 【终极防爆墙 2】：如果是纯哑巴输出，强行赋予一个带梯度的虚拟值0，防止除以0产生 NaN
-    #             if act_token_length <= 0:
-    #                 # 乘以 0.0 保留前向传播图，防止反向传播报错
-    #                 dummy_zero = (pi_log_softmax[thread, 0, 0, 0] * 0.0).to(self.device)
-    #                 thread_log_probs.append(dummy_zero)
-    #                 thread_entropies.append(dummy_zero)
-    #                 continue
-
-    #             log_softmax_slice = pi_log_softmax[thread, 0, :act_token_length, :]
-    #             action_token_slice = action_tokens[thread, agent_idx, :act_token_length].to(agent.device)
-
-    #             # 【终极防爆墙 3】：保证 gather 索引不越界
-    #             action_token_slice = torch.clamp(action_token_slice, min=0, max=vocab_size - 1)
-
-    #             token_log_probs = torch.gather(log_softmax_slice, -1, action_token_slice.unsqueeze(-1)).squeeze(-1)
-                
-    #             # 【终极防爆墙 4】：强制归一化除数最小为1，杜绝 NaN 毒害显存
-    #             action_log_prob = self.normalize_log_probs(token_log_probs.sum(), action_token_slice)
-    #             entropy = Categorical(logits=agent_logits[thread, 0, :act_token_length, :]).entropy().mean()
-
-    #             thread_log_probs.append(action_log_prob.to(self.device))
-    #             thread_entropies.append(entropy.to(self.device))
-
-    #         # 合并当前 Agent 在所有 Thread 上的结果
-    #         batch_log_probs.append(torch.stack(thread_log_probs))
-    #         batch_entropies.append(torch.stack(thread_entropies))
-
-    #         # 4. 手动清理显存
-    #         del pi_outputs, agent_logits, pi_log_softmax
-    #         torch.cuda.empty_cache()
-
-    #     # 将 List[Tensor] 堆叠为最终形状 [Batch, Num_Agents]
-    #     log_probs_tensor = torch.stack(batch_log_probs, dim=1)
-    #     entropies_tensor = torch.stack(batch_entropies, dim=1)
-
-    #     return log_probs_tensor, entropies_tensor
 
     @torch.no_grad()
     def infer_for_rollout(self, obs, evaluating: bool = False):

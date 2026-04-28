@@ -5,7 +5,7 @@ python evaluate.py \
   --model_path model_path \
   --data_path data_path \
   --profile_path ../scripts/profiles/math_dual.json \
-  --lora_path lora_checkpoint_path \
+  --load_path load_checkpoint_path \
   --output_dir output_dir_name \
   --response_filename responses.json \
   --metrics_filename metrics.json \

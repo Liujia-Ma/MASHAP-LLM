@@ -12,6 +12,7 @@ from .llmshap_mode_utils import (
     build_pureshap_allocator,
     build_llmshap_allocator,
     load_llmshap_checkpoint,
+    resolve_llmshap_checkpoint_dir,
     register_llmshap_estimator_on_mas,
     save_llmshap_value_head,
 )
@@ -41,6 +42,9 @@ class MathRunner:
             model_path=self.all_args.model_name_or_path, 
             context_window=self.all_args.context_window,
             max_new_tokens=self.all_args.max_new_tokens, 
+            do_sample=self.all_args.do_sample,
+            top_k=self.all_args.top_k,
+            temperature=self.all_args.temperature,
             num_agents=self.num_agents,
             profile_path=self.all_args.profile_path,
             experiment_mode=self.all_args.experiment_mode,
@@ -65,13 +69,26 @@ class MathRunner:
         if self.all_args.experiment_mode == "llmshap":
             self.llmshap_estimator = build_llmshap_estimator(self.all_args, self.mas)
             register_llmshap_estimator_on_mas(self.mas, self.llmshap_estimator)
+            if self.all_args.load_path is not None:
+                checkpoint_dir = resolve_llmshap_checkpoint_dir(self.all_args.load_path)
+                loaded_value_head, loaded_optimizer = load_llmshap_checkpoint(
+                    self.llmshap_estimator,
+                    checkpoint_dir,
+                    map_location="cpu",
+                )
+                if loaded_value_head:
+                    print(f"[MathRunner] Loaded llmshap value head from {checkpoint_dir}")
+                else:
+                    print(f"[MathRunner] warning: llmshap value head not found under {checkpoint_dir}")
+                if loaded_optimizer:
+                    print(f"[MathRunner] Loaded llmshap optimizer from {checkpoint_dir}")
             self.llmshap_allocator = build_llmshap_allocator()
             for env in self.envs.envs:
-                env.set_llmshap_rollout_allocator_fn(self._allocate_llmshap_rollout_rewards)
+                env.set_rollout_allocator_fn(self._allocate_llmshap_rollout_rewards)
         elif self.all_args.experiment_mode == "pureshap":
             self.pureshap_allocator = build_pureshap_allocator()
             for env in self.envs.envs:
-                env.set_llmshap_rollout_allocator_fn(self._allocate_pureshap_rewards)
+                env.set_rollout_allocator_fn(self._allocate_pureshap_rollout_rewards)
 
         self.run_dir = config["run_dir"]
         self._make_log_dir()
@@ -305,7 +322,7 @@ class MathRunner:
         debug["absence_message_template"] = DEFAULT_ABSENCE_MESSAGE_TEMPLATE
         return rewards.tolist(), debug
 
-    def _allocate_pureshap_rewards(
+    def _allocate_pureshap_rollout_rewards(
         self,
         actions: np.ndarray,
         base_state: str,

@@ -95,6 +95,35 @@ def load_llmshap_checkpoint(
     return loaded_value_head, loaded_optimizer
 
 
+def resolve_llmshap_checkpoint_dir(load_path: str) -> str:
+    """
+    Resolve the actual checkpoint directory that contains llmshap_value_head.pth.
+    Supports:
+    1) direct step dir: .../steps_xxxx
+    2) run dir: .../run_xxx (auto-pick latest steps_xxxx with llmshap checkpoint)
+    """
+    if os.path.exists(os.path.join(load_path, "llmshap_value_head.pth")):
+        return load_path
+
+    if not os.path.isdir(load_path):
+        return load_path
+
+    candidates = []
+    for entry in os.listdir(load_path):
+        entry_path = os.path.join(load_path, entry)
+        if (
+            os.path.isdir(entry_path)
+            and entry.startswith("steps_")
+            and os.path.exists(os.path.join(entry_path, "llmshap_value_head.pth"))
+        ):
+            candidates.append(entry_path)
+
+    if len(candidates) == 0:
+        return load_path
+
+    return sorted(candidates)[-1]
+
+
 def build_llmshap_joint_tokens(
     *,
     tokenizer,

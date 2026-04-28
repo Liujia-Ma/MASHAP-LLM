@@ -50,7 +50,7 @@ class CodingEnv:
         # - shapley: allocate reward by marginal contribution
         self.experiment_mode = experiment_mode
         self.debug_print_state = debug_print_state
-        self.llmshap_rollout_allocator_fn = None
+        self.rollout_allocator_fn = None
         
         self.problem = None
         self.label = None
@@ -84,14 +84,14 @@ class CodingEnv:
         self.step_count = 0
         return obs
     
-    def set_llmshap_rollout_allocator_fn(self, allocator_fn):
+    def set_rollout_allocator_fn(self, allocator_fn):
         """
         Inject Q-critic rollout allocator callback.
 
         allocator_fn signature:
             allocator_fn(actions: np.ndarray[str], base_state: str, global_score: float, original_problem: str, gt) -> tuple[list[float], dict]
         """
-        self.llmshap_rollout_allocator_fn = allocator_fn
+        self.rollout_allocator_fn = allocator_fn
 
     def _score_terminal(self, actions) -> float:
         """
@@ -132,12 +132,12 @@ class CodingEnv:
 
         next_obs = np.array([self.current_state for _ in range(self.n_agents)], dtype=np.object_)
         if self.experiment_mode in ("llmshap", "pureshap"):
-            if self.llmshap_rollout_allocator_fn is None:
+            if self.rollout_allocator_fn is None:
                 raise RuntimeError(
-                    f"{self.experiment_mode} mode requires llmshap_rollout_allocator_fn. "
+                    f"{self.experiment_mode} mode requires rollout_allocator_fn. "
                     "Please ensure runner injects it before training."
                 )
-            alloc_out = self.llmshap_rollout_allocator_fn(actions, base_state, float(score), self.problem, self.label)
+            alloc_out = self.rollout_allocator_fn(actions, base_state, float(score), self.problem, self.label)
             if isinstance(alloc_out, tuple) and len(alloc_out) == 2:
                 rewards, shapley_debug = alloc_out
             else:

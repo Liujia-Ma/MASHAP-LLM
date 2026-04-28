@@ -83,10 +83,14 @@ class Agent:
                     f"Tried: {flat_cfg} and {nested_cfg}"
                 )
             self.model = PeftModel.from_pretrained(
-                self.base_model, adapter_path, adapter_name=self.role
+                self.base_model, adapter_path, adapter_name=self.role, is_trainable=True
             )
             self.model.set_adapter(self.role)
             self.model.train()
+            print(
+                f"[Agent] Loaded LoRA adapter for role='{self.role}' "
+                f"from: {adapter_path} (device={self.device})"
+            )
         
         self.model.print_trainable_parameters()
         self.model.half()
