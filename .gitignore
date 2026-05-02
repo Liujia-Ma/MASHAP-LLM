@@ -177,3 +177,4 @@ code/
 scripts/
 marft/eval/results/
 marft/eval/*.sh
+marft/envs/coding/benchmark/
