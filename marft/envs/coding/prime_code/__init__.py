@@ -21,6 +21,8 @@ from .utils import check_correctness as apps_check_correctness
 def compute_score(completion, test_cases, continuous=False):
     # try to get code solution from completion. if the completion is pure code, this will not take effect.
     solution = completion.split("```python")[-1].split("```")[0]
+    success = False
+    metadata_list = None
     try:
         try:
             if not isinstance(test_cases, dict):
@@ -31,8 +33,12 @@ def compute_score(completion, test_cases, continuous=False):
         # Complete check on all in-out pairs first. If there is no failure, per-sample test can be skipped.
         try:
             res, metadata = apps_check_correctness(in_outs=test_cases, generation=solution, timeout=5, debug=False)
-            metadata = dict(enumerate(metadata))[0]
+            try:
+                metadata = dict(enumerate(metadata))[0]
+            except Exception:
+                metadata = {}
             success = all(map(lambda x: x is True, res))
+            metadata_list = metadata
             if success:
                 return success, metadata
         except Exception:

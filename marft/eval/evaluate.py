@@ -3,10 +3,11 @@ import sys
 import numbers
 sys.path.append("../../")
 from marft.mas import MAS
-from marft.eval.evaluators import MathEvaluator
+from marft.eval.evaluators import MathEvaluator, CodingEvaluator
 
 EVALUATOR_MAP = {
     "math": MathEvaluator,
+    "coding": CodingEvaluator,
 }
 
 def build_parser():
@@ -16,7 +17,7 @@ def build_parser():
     parser.add_argument('--model_path', type=str, required=True, help='path to the model')
     parser.add_argument('--data_path', type=str, required=True, help='path to the data')
     parser.add_argument('--profile_path', type=str, default=None, help='path to the profile')
-    parser.add_argument('--lora_path', type=str, default=None, help='root path to LoRA adapters')
+    parser.add_argument('--load_path', type=str, default=None, help='path to adapter/checkpoint to load')
     parser.add_argument('--output_dir', type=str, default=None, help='output directory')
     parser.add_argument('--response_filename', type=str, default=None, help='response file name')
     parser.add_argument('--metrics_filename', type=str, default=None, help='metrics file name')
@@ -30,7 +31,8 @@ def build_parser():
     parser.add_argument('--top_p', type=float, default=0.95, help='top p sampling')
     parser.add_argument('--temperature', type=float, default=0.5, help='temperature for sampling')
     parser.add_argument('--max_new_tokens', type=int, default=1024, help='maximum number of new tokens')
-    parser.add_argument('--do_sample', action='store_true', help='do sampling')
+    parser.add_argument('--do_sample', dest='do_sample', action='store_true', default=True, help='enable sampling (default: True)')
+    parser.add_argument('--no_do_sample', dest='do_sample', action='store_false', help='disable sampling')
     
     # 动态添加评估器特定参数    
     subparsers = parser.add_subparsers(dest='subcommand')
@@ -45,9 +47,12 @@ def main():
     args = parser.parse_args()
     
     evaluator_cls = EVALUATOR_MAP[args.evaluator_type]
-    
+
     mas = MAS(**vars(args), skip_critic_init=True)
-    print(f"✅ Successfully loaded LoRA from path: {args.lora_path}")
+    if args.load_path is not None:
+        print(f"✅ Successfully loaded adapter from path: {args.load_path}")
+    else:
+        print("⚠️ Load path is not provided; evaluating base model only.")
     
     evaluator = evaluator_cls(
         mas=mas,

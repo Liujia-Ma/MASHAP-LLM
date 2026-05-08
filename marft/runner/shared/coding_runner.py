@@ -148,7 +148,7 @@ class CodingRunner:
             # post process
             # save model
             if (episode == episodes - 1) or ((episode + 1) % self.all_args.save_interval == 0):
-                self.save(training_steps)
+                self.save(total_num_steps)
 
             # log info
             if episode % self.log_interval == 0:
