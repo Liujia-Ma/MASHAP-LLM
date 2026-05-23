@@ -4,9 +4,9 @@ from abc import ABC
 import torch
 import torch.nn as nn
 from torch.distributions.categorical import Categorical
-from marft.utils.util import get_gard_norm, huber_loss, mse_loss, to_cuda
-from marft.buffers import TokenBuffer
-from marft.mas import MAS
+from mashap_llm.utils.util import get_gard_norm, huber_loss, mse_loss, to_cuda
+from mashap_llm.buffers import TokenBuffer
+from mashap_llm.mas import MAS
 
 
 class TPPOTrainer(ABC):

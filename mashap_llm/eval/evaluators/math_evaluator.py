@@ -1,8 +1,8 @@
 import numpy as np
 from tqdm import tqdm
-from marft.eval.evaluators.base_evaluator import BaseEvaluator
-from marft.eval.utils.grader import math_equal
-from marft.eval.utils.parse_utils_qwen import extract_answer
+from mashap_llm.eval.evaluators.base_evaluator import BaseEvaluator
+from mashap_llm.eval.utils.grader import math_equal
+from mashap_llm.eval.utils.parse_utils_qwen import extract_answer
 
 
 class MathEvaluator(BaseEvaluator):

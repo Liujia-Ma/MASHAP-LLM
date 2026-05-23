@@ -23,7 +23,7 @@ So one update collects 8 environment steps. Since `horizon=2`, the env is done a
 
 ## 2. GAE Equations Actually Used in APPO (Code-Aligned)
 
-Implementation: `marft/buffers/action_level_buffer.py::compute_gae_and_returns`.
+Implementation: `mashap_llm/buffers/action_level_buffer.py::compute_gae_and_returns`.
 
 Let `t` be the environment step and `i` the agent index (`i=0` reasoner, `i=1` actor).
 

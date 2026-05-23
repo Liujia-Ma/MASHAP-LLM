@@ -8,10 +8,10 @@ import yaml
 import re
 
 sys.path.append("../../")
-from marft.config import get_config
-from marft.envs.math.math_env import MathEnv
-from marft.envs.env_wrappers import ShareSubprocVecEnv, ShareDummyVecEnv
-from marft.runner.shared.math_runner import MathRunner as Runner
+from mashap_llm.config import get_config
+from mashap_llm.envs.math.math_env import MathEnv
+from mashap_llm.envs.env_wrappers import ShareSubprocVecEnv, ShareDummyVecEnv
+from mashap_llm.runner.shared.math_runner import MathRunner as Runner
 
 
 def make_train_env(all_args):

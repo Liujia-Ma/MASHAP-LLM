@@ -3,9 +3,9 @@ import torch
 import torch.nn as nn
 import numpy as np
 from abc import ABC
-from marft.mas import MAS
-from marft.buffers import ActionBuffer
-from marft.utils.util import get_gard_norm, huber_loss, mse_loss, to_cuda
+from mashap_llm.mas import MAS
+from mashap_llm.buffers import ActionBuffer
+from mashap_llm.utils.util import get_gard_norm, huber_loss, mse_loss, to_cuda
 
 
 class APPOTrainer(ABC):

@@ -186,10 +186,10 @@ class MAS(ABC):
 
     def _init_critic(self, model_path, critic_path=None):
         if self.algo == "APPO":
-            from marft.critics import ActionCritic
+            from mashap_llm.critics import ActionCritic
             critic = ActionCritic(model_path, device=self.device)
         elif self.algo == "TPPO":
-            from marft.critics import TokenCritic
+            from mashap_llm.critics import TokenCritic
             critic = TokenCritic(model_path, device=self.device)
         else:
             raise NotImplementedError

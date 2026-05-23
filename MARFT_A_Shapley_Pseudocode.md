@@ -2,12 +2,12 @@
 
 本文给出基于当前代码实现的两种 Shapley 奖励分配模式伪代码：`llmshap` 与 `pureshap`。对应主流程参考：
 
-- `marft/runner/shared/math_runner.py`
-- `marft/reward/llmshap_allocator.py`
-- `marft/reward/pureshap_allocator.py`
-- `marft/critics/llmshap_estimator.py`
-- `marft/buffers/action_level_buffer.py`
-- `marft/algorithms/appo_trainer.py`
+- `mashap_llm/runner/shared/math_runner.py`
+- `mashap_llm/reward/llmshap_allocator.py`
+- `mashap_llm/reward/pureshap_allocator.py`
+- `mashap_llm/critics/llmshap_estimator.py`
+- `mashap_llm/buffers/action_level_buffer.py`
+- `mashap_llm/algorithms/appo_trainer.py`
 
 ---
 

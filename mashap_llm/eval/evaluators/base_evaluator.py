@@ -5,7 +5,7 @@ from typing import Dict, Any
 import torch
 from datetime import datetime
 import numpy as np
-from marft.mas import MAS
+from mashap_llm.mas import MAS
 
 class BaseEvaluator(ABC):
 

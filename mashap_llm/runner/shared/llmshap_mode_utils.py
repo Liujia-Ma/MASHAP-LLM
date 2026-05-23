@@ -5,8 +5,8 @@ from typing import Iterable, Sequence
 
 import torch
 
-from marft.critics import CounterfactualEstimator
-from marft.reward import LLMShapAllocator, PureShapleyAllocator
+from mashap_llm.critics import CounterfactualEstimator
+from mashap_llm.reward import LLMShapAllocator, PureShapleyAllocator
 
 DEFAULT_ABSENCE_MESSAGE_TEMPLATE = "System: The {role} did not participate in this round."
 

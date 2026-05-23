@@ -35,8 +35,8 @@ This repository aims to help researchers in academia and industry transition int
 ### Installation
 1. Create a virtual environment:
    ```bash
-   conda create -n marft
-   conda activate marft
+   conda create -n mashap_llm
+   conda activate mashap_llm
    ```
 
 2. Clone the repository and install dependencies:
@@ -55,7 +55,7 @@ The repository provides a complete framework for MARFT. To get started:
 
 ## Environment Extension
 To create a custom environment for your specific agentic task:
-1. Navigate to `marft/envs` and create a folder for your environment.
+1. Navigate to `mashap_llm/envs` and create a folder for your environment.
 2. Create a Python file (e.g., `env_name.py`) and implement the necessary environment components:
    - `__init__`: Initialize the environment.
    - `reset`: Reset the environment state.

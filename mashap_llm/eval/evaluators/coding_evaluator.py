@@ -1,8 +1,8 @@
 import numpy as np
 from tqdm import tqdm
 
-from marft.envs.coding import prime_code
-from marft.eval.evaluators.base_evaluator import BaseEvaluator
+from mashap_llm.envs.coding import prime_code
+from mashap_llm.eval.evaluators.base_evaluator import BaseEvaluator
 
 
 class CodingEvaluator(BaseEvaluator):

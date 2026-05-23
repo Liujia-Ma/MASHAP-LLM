@@ -174,9 +174,9 @@ cython_debug/
 .pypirc
 
 code/
-marft/scripts/*
-!marft/scripts/*.py
-marft/eval/results/
-marft/eval/*.sh
-marft/envs/coding/benchmarks/
-marft/envs/math/benchmarks/
+mashap_llm/scripts/*
+!mashap_llm/scripts/*.py
+mashap_llm/eval/results/
+mashap_llm/eval/*.sh
+mashap_llm/envs/coding/benchmarks/
+mashap_llm/envs/math/benchmarks/

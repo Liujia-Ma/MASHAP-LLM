@@ -2,8 +2,8 @@ import argparse
 import sys
 import numbers
 sys.path.append("../../")
-from marft.mas import MAS
-from marft.eval.evaluators import MathEvaluator, CodingEvaluator
+from mashap_llm.mas import MAS
+from mashap_llm.eval.evaluators import MathEvaluator, CodingEvaluator
 
 EVALUATOR_MAP = {
     "math": MathEvaluator,

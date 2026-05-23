@@ -3,8 +3,8 @@ import numpy as np
 from tqdm import tqdm
 import torch
 from tensorboardX import SummaryWriter
-from marft.mas import MAS
-from marft.envs.coding import prime_code
+from mashap_llm.mas import MAS
+from mashap_llm.envs.math import math_verify
 from .llmshap_mode_utils import (
     DEFAULT_ABSENCE_MESSAGE_TEMPLATE,
     build_llmshap_joint_tokens,
@@ -17,7 +17,7 @@ from .llmshap_mode_utils import (
     save_llmshap_value_head,
 )
 
-class CodingRunner:
+class MathRunner:
     """Runner class to perform training, evaluation. and data collection. See parent class for details."""
 
     def __init__(self, config):
@@ -30,8 +30,11 @@ class CodingRunner:
         self.log_interval = self.all_args.log_interval
         self.eval_interval = self.all_args.eval_interval
         self.algo = self.all_args.algorithm_name
+
+        # 所有的step都要加上resume_steps偏移，以保证日志和模型保存的step数是连续的
         self.resume_steps = int(getattr(self.all_args, "resume_steps", 0) or 0)
         self.resume_training_updates = self.resume_steps // max(1, self.episode_length * self.n_rollout_threads)
+        
         self.envs = config["envs"]
         self.eval_envs = config["eval_envs"]
 
@@ -51,13 +54,13 @@ class CodingRunner:
         )
 
         if self.algo == "APPO":
-            from marft.algorithms import APPOTrainer
-            from marft.buffers.action_level_buffer import ActionBuffer
+            from mashap_llm.algorithms import APPOTrainer
+            from mashap_llm.buffers.action_level_buffer import ActionBuffer
             self.trainer = APPOTrainer(self.all_args, self.mas)
             self.buffer = ActionBuffer(self.all_args, self.num_agents)
         elif self.algo == "TPPO":
-            from marft.algorithms import TPPOTrainer
-            from marft.buffers.token_level_buffer import TokenBuffer
+            from mashap_llm.algorithms import TPPOTrainer
+            from mashap_llm.buffers.token_level_buffer import TokenBuffer
             self.trainer = TPPOTrainer(self.all_args, self.mas)
             self.buffer = TokenBuffer(self.all_args, self.num_agents, self.mas.tokenizer.pad_token_id)
         else:
@@ -74,11 +77,11 @@ class CodingRunner:
                     map_location="cpu",
                 )
                 if loaded_value_head:
-                    print(f"[CodingRunner] Loaded llmshap value head from {checkpoint_dir}")
+                    print(f"[MathRunner] Loaded llmshap value head from {checkpoint_dir}")
                 else:
-                    print(f"[CodingRunner] warning: llmshap value head not found under {checkpoint_dir}")
+                    print(f"[MathRunner] warning: llmshap value head not found under {checkpoint_dir}")
                 if loaded_optimizer:
-                    print(f"[CodingRunner] Loaded llmshap optimizer from {checkpoint_dir}")
+                    print(f"[MathRunner] Loaded llmshap optimizer from {checkpoint_dir}")
             self.llmshap_allocator = build_llmshap_allocator()
             for env in self.envs.envs:
                 env.set_rollout_allocator_fn(self._allocate_llmshap_rollout_rewards)
@@ -125,9 +128,10 @@ class CodingRunner:
                 self.insert(data)
 
                 for i in range(self.n_rollout_threads):
-                    global_step = self.resume_steps + episode * self.episode_length * self.n_rollout_threads + step * self.n_rollout_threads + i
+                    global_step = total_num_steps + step * self.n_rollout_threads + i
                     episode_global_scores.append(float(infos[i].get("total_score", infos[i].get("episodic_return", 0.0))))
                     
+                    # Log llmshap stats only in llmshap mode.
                     if llmshap_stats_enabled:
                         llmshap_loss = infos[i].get("llmshap_loss", None)
                         llmshap_grad_norm = infos[i].get("llmshap_grad_norm", None)
@@ -156,7 +160,6 @@ class CodingRunner:
                     avg_step_reward = np.mean(self.buffer.rewards[self.buffer.pre_batch_index, :, :, -1])
                 else:
                     avg_step_reward = float(np.mean(episode_global_scores)) if len(episode_global_scores) > 0 else 0.0
-                
                 # Log per-agent reward/advantage for all modes.
                 per_agent_reward = np.mean(self.buffer.rewards[self.buffer.pre_batch_index], axis=(0, 1))
                 if hasattr(self.buffer, "action_level_advantages"):
@@ -167,9 +170,10 @@ class CodingRunner:
                     per_agent_advantage = None
                 progress_bar.set_description(
                     f"Episode {episode}/{episodes}"
-                    f"(total step num: {total_num_steps} | average step reward: {avg_step_reward})",
+                    f"(total step num: {total_num_steps} | average step reward: {avg_step_reward:.4f})",
                 )
                 train_infos["average_step_rewards"] = avg_step_reward
+                
                 # Log per-agent rewards and advantages for each mode if applicable.
                 if per_agent_reward is not None:
                     for agent_id, agent_reward in enumerate(per_agent_reward):
@@ -177,6 +181,7 @@ class CodingRunner:
                 if per_agent_advantage is not None:
                     for agent_id, agent_adv in enumerate(per_agent_advantage):
                         train_infos[f"advantage/agent_{agent_id}"] = float(agent_adv)
+                
                 # Log llmshap stats only in llmshap mode.
                 if llmshap_stats_enabled:
                     if len(llmshap_losses) > 0:
@@ -184,7 +189,7 @@ class CodingRunner:
                     if len(llmshap_grad_norms) > 0:
                         train_infos["llmshap/grad_norm"] = float(np.mean(llmshap_grad_norms))
                 self.log_train(train_infos, total_num_steps)
-                self.writter.add_scalar('average_reward', avg_step_reward, training_steps)
+                self.writter.add_scalar('average reward', avg_step_reward, training_steps)
             progress_bar.update(1)
 
     def insert(self, data):
@@ -211,7 +216,7 @@ class CodingRunner:
         base_state: str,
         global_score: float,
         original_problem: str,
-        gt,
+        gt: str,
     ):
         llmshap_device = self.mas.get_llmshap_device()
         all_agents = tuple(range(self.num_agents))
@@ -260,13 +265,7 @@ class CodingRunner:
                 return 0.0
             score = 0.0
             for ans in answers:
-                raw_score = prime_code.compute_score(ans, gt, continuous=True)
-                # prime_code returns (main_score, metadata); use main_score only.
-                if isinstance(raw_score, tuple):
-                    main_score = raw_score[0]
-                else:
-                    main_score = raw_score
-                score += float(main_score)
+                score += float(math_verify.compute_score(ans, gt))
             return float(score / len(answers))
 
         # Train llmshap on all coalition rollouts to reduce train/infer distribution shift.
@@ -329,7 +328,7 @@ class CodingRunner:
         base_state: str,
         global_score: float,
         original_problem: str,
-        gt,
+        gt: str,
     ):
         all_agents = tuple(range(self.num_agents))
         coalition_actions_cache: dict[tuple[int, ...], np.ndarray] = {
@@ -370,12 +369,7 @@ class CodingRunner:
                 return 0.0
             score = 0.0
             for ans in answers:
-                raw_score = prime_code.compute_score(ans, gt, continuous=True)
-                if isinstance(raw_score, tuple):
-                    main_score = raw_score[0]
-                else:
-                    main_score = raw_score
-                score += float(main_score)
+                score += float(math_verify.compute_score(ans, gt))
             return float(score / len(answers))
 
         def coalition_score_fn(coalition_indices: tuple[int, ...]) -> float:
@@ -415,17 +409,14 @@ class CodingRunner:
     @torch.no_grad()
     def eval(self, training_steps):
         print(f"start evaluating......")
+        eval_episode = 0
+        eval_episode_rewards = []
         eval_obs = self.eval_envs.reset()
-        eval_env_infos = {}
         _, eval_actions, _, _, _ = self.mas.infer_for_rollout(eval_obs, evaluating=True)
         eval_next_obs, eval_rewards, eval_dones, eval_infos = self.eval_envs.step(eval_actions)
-        effective_eval_rewards = []
-        for i in range(self.num_agents):
-            eval_env_infos[f"eval_rewards/{self.mas.profiles[i]['role']}"] = eval_rewards[:, i]
-            if self.mas.profiles[i]['with_answer']:
-                effective_eval_rewards.extend(eval_rewards[:, i])
-        eval_env_infos["eval_rewards/effective"] = effective_eval_rewards
-        print(f"eval rewards: {np.mean(effective_eval_rewards)}")
+        eval_episode_rewards = eval_rewards[:, -1]
+        eval_env_infos = {"eval_episode_rewards": eval_episode_rewards}
+        print("eval reward is {}.".format(np.mean(eval_episode_rewards)))
         self.log_eval(eval_env_infos, training_steps)
 
         # eval_dones_env = np.all(eval_dones, axis=1)
@@ -451,14 +442,15 @@ class CodingRunner:
         if not os.path.exists(self.save_dir):
             os.makedirs(self.save_dir)
 
-    def log_eval(self, eval_infos, training_steps):
+    def log_eval(self, eval_infos, total_num_steps):
         for k, v in eval_infos.items():
             if len(v) > 0:
-                self.writter.add_scalars(k, {k: np.mean(v)}, training_steps)
+                self.writter.add_scalars(k, {k: np.mean(v)}, total_num_steps)
 
     def save(self, steps):
         """Save the MAS policies, critic networks, and llmshap value-head (if present)."""
         self.mas.save(self.save_dir, steps)
+        # Trainer.save_optimizers will include llmshap optimizer state under optimizers.pt when applicable
         self.trainer.save_optimizers(self.save_dir, steps)
 
         # Save llmshap value_head in standalone file.
@@ -466,19 +458,22 @@ class CodingRunner:
             try:
                 exp_path = os.path.join(self.save_dir, "steps_{:04d}".format(steps))
                 llmshap_vh_path = save_llmshap_value_head(self.llmshap_estimator, exp_path)
-                print(f"[CodingRunner] llmshap checkpoints saved -> {exp_path}")
+                print(f"[MathRunner] llmshap checkpoints saved -> {exp_path}")
             except Exception as e:
-                print(f"[CodingRunner] warning: failed to save llmshap state: {e}")
+                print(f"[MathRunner] warning: failed to save llmshap state: {e}")
 
     def restore(self, model_dir):
         """Restore policy's networks from a saved model and load llmshap if present."""
+        # try MAS restore (if implemented)
         try:
             self.mas.restore(model_dir)
         except Exception:
             pass
 
+        # Attempt to load llmshap value head and optimizer if llmshap allocator exists
         if hasattr(self, "llmshap_estimator") and self.llmshap_estimator is not None:
             checkpoint_dir = model_dir
+            # If model_dir is run root, locate the first steps_* dir with llmshap checkpoint.
             if os.path.isdir(model_dir) and not os.path.exists(os.path.join(model_dir, "llmshap_value_head.pth")):
                 for entry in os.listdir(model_dir):
                     entry_path = os.path.join(model_dir, entry)
@@ -493,12 +488,12 @@ class CodingRunner:
                     map_location="cpu",
                 )
                 if loaded_value_head:
-                    print(f"[CodingRunner] Loaded llmshap value head from {checkpoint_dir}")
+                    print(f"[MathRunner] Loaded llmshap value head from {checkpoint_dir}")
                 if loaded_optimizer:
-                    print(f"[CodingRunner] Loaded llmshap optimizer from {checkpoint_dir}/optimizers.pt")
+                    print(f"[MathRunner] Loaded llmshap optimizer from {checkpoint_dir}/optimizers.pt")
                 if not loaded_value_head:
-                    print(f"[CodingRunner] no llmshap checkpoint found at {checkpoint_dir}")
+                    print(f"[MathRunner] no llmshap checkpoint found at {checkpoint_dir}")
                 else:
                     pass
             except Exception as e:
-                print(f"[CodingRunner] warning: failed to load llmshap state: {e}")
+                print(f"[MathRunner] warning: failed to load llmshap state: {e}")
