@@ -198,6 +198,7 @@ def get_config():
     parser.add_argument("--experiment_mode", type=str, default="baseline", choices=["baseline", "llmshap", "pureshap"], help="reward allocation strategy. 'baseline' is baseline; 'llmshap' uses counterfactual rollout + LLMShap valuation; 'pureshap' computes exact Shapley from enumerated coalition environment scores without LLMShap prediction.")
     parser.add_argument("--llmshap_lr", type=float, default=1e-5, help="learning rate for llmshap value head.")
     parser.add_argument("--llmshap_layers", type=int, default=1, choices=[1, 3], help="number of layers in Q-critic value head; 1 for linear, 3 for deeper MLP.")
+    parser.add_argument("--llmshap_tau_floor", type=float, default=0.05, help="tau_floor for llmshap floored sign-aware renormalization.")
 
     # run parameters
     parser.add_argument("--use_linear_lr_decay", action="store_true", default=False, help="use a linear schedule on the learning rate")

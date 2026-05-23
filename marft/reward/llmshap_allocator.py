@@ -13,12 +13,45 @@ def _safe_score(score) -> float:
     return float(score)
 
 
-def _normalize_to_total(phi: np.ndarray, total_score: float) -> np.ndarray:
-    s = float(np.sum(phi))
-    if math.isclose(s, 0.0, rel_tol=1e-12, abs_tol=1e-12):
-        return np.zeros_like(phi)
-    return phi * (total_score / s)
+# def _normalize_to_total(phi: np.ndarray, total_score: float) -> np.ndarray:
+#     s = float(np.sum(phi))
+#     if math.isclose(s, 0.0, rel_tol=1e-12, abs_tol=1e-12):
+#         return np.zeros_like(phi)
+#     return phi * (total_score / s)
 
+def _normalize_to_total(phi: np.ndarray, total_score: float, tau_floor: float) -> np.ndarray:
+    """
+    Floored, sign-aware renormalization for LLMShap to preserve budget balance.
+    Implements Eq. (8) from the manuscript to prevent three failure cases:
+    (i) vanishing sum, (ii) subfloor magnitude, (iii) sign opposite to total_score.
+    """
+    s = float(np.sum(phi))
+    n = len(phi)
+    
+    tau_floor = float(max(0.0, tau_floor))
+    
+    # Check "rescaling OK" conditions:
+    # 1. 绝对值必须大于下限 (防止 (i)分母消失 和 (ii)幅值过小放大噪声)
+    magnitude_ok = abs(s) >= tau_floor
+    
+    # 2. 预测总和的符号必须与真实得分的符号一致 (防止 (iii)符号相反导致好人扣分)
+    # 注意: 如果 total_score 为 0，通常不会发生符号相反的问题，但也需要安全处理。
+    if total_score > 0:
+        sign_ok = (s > 0)
+    elif total_score < 0:
+        sign_ok = (s < 0)
+    else: # total_score == 0
+        sign_ok = True 
+        
+    # 如果通过了所有安全检查，使用乘法缩放
+    if magnitude_ok and sign_ok and np.isfinite(s):
+        return phi * (total_score / s)
+        
+    # 如果触发了任何危险情况 (Fallback 机制)
+    # 退化为完全平分 (Equal allocation: R / n)，这是数学上最安全的保底策略
+    else:
+        # np.full_like 创建一个形状和 phi 一样，且用 total_score / n 填充的数组
+        return np.full_like(phi, total_score / n, dtype=float)
 
 def _compute_shapley_exact(
     num_agents: int,
@@ -53,6 +86,10 @@ class LLMShapAllocator:
     estimated by critic-side estimator, and allocation is pure Shapley math.
     """
 
+    def __init__(self, *, tau_floor: float = 0.05):
+        # Floored renormalization threshold in score units.
+        self.tau_floor = float(max(0.0, tau_floor))
+
     def allocate(
         self,
         *,
@@ -76,7 +113,7 @@ class LLMShapAllocator:
 
         total_score = float(total_score_precomputed) if total_score_precomputed is not None else coalition_score(all_agents)
         phi = _compute_shapley_exact(num_agents, coalition_score)
-        phi = _normalize_to_total(phi, total_score)
+        phi = _normalize_to_total(phi, total_score, self.tau_floor)
         phi = phi.astype(np.float32)
 
         debug = {

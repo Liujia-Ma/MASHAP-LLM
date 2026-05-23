@@ -21,8 +21,8 @@ def build_llmshap_estimator(all_args, mas) -> CounterfactualEstimator:
     )
 
 
-def build_llmshap_allocator() -> LLMShapAllocator:
-    return LLMShapAllocator()
+def build_llmshap_allocator(all_args) -> LLMShapAllocator:
+    return LLMShapAllocator(tau_floor=float(getattr(all_args, "llmshap_tau_floor", 0.05)))
 
 
 def build_pureshap_allocator() -> PureShapleyAllocator:
