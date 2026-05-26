@@ -1,4 +1,4 @@
-# MARFT-A-Shapley 伪代码（LLMShap / PureShap）
+# MASHAP-LLM Shapley 伪代码（LLM-SHAP / PureSHAP）
 
 本文给出基于当前代码实现的两种 Shapley 奖励分配模式伪代码：`llmshap` 与 `pureshap`。对应主流程参考：
 
@@ -22,10 +22,10 @@
 
 ---
 
-## 1. 主算法：MARFT-A with Shapley Reward Allocation
+## 1. 主算法：MASHAP-LLM with Shapley Reward Allocation
 
 ```text
-Algorithm 1: MARFT-A-Shapley (mode ∈ {llmshap, pureshap})
+Algorithm 1: MASHAP-LLM-Shapley (mode ∈ {llmshap, pureshap})
 Input:
   agent policies {π_i}, centralized critic V_φ,
   mode, episode_length T, PPO/APPO hyperparameters
